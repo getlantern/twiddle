@@ -64,9 +64,11 @@ record length. Pick on performance (ChaCha20 where AES is unaccelerated), and ma
 ServerHello *claim* the suite we actually use, since the suite's hash does set the PSK binder length
 (32 vs 48 bytes).
 
-**No inner length fields, no multiplexing.** The tunnel carries a single proxied byte stream and sing-box
-dials one connection per outbound, so record boundaries are the only framing needed. The destination
-address is simply the first record's payload, as `reflex` does it.
+**Multiplexing is required.** An earlier version of this document said the opposite — that a single proxied
+byte stream needed no inner framing. That is wrong: Xue et al. 2024 show that any proxy wrapping TLS-bearing
+traffic leaks its inner handshakes, and that mux is the countermeasure protocol designers "should treat as a
+required component, not an optional optimization." Multiplexing means the inner framing **does** need stream
+IDs and per-stream lengths. See [traffic-analysis.md](traffic-analysis.md).
 
 ## The part that actually needs design: shaping
 
@@ -79,8 +81,11 @@ The shaping layer must at minimum:
 - **coalesce** small writes rather than emitting a record each
 - **split** large writes at plausible boundaries (TLS max plaintext is 2^14 = 16384, but real servers
   frequently use less)
-- **pad** toward a target size distribution
-- **avoid** a fixed inter-record timing signature
+- **pad** toward a target size distribution — but note that **padding alone provably does not defeat
+  TLS-in-TLS detection**; it cannot shrink burst sizes or round-trip counts
+- **avoid** a fixed inter-record timing signature — and, more importantly, avoid *regularising* the
+  human-driven timing already present in the stream, which is a stronger defence than any jitter we could
+  synthesise (see [traffic-analysis.md](traffic-analysis.md))
 
 And the target distribution should be *measured*, not guessed. The flight measurements in
 `harvest/testdata/tls13-flight.log` cover only the handshake; **steady-state browsing record sizes are not
