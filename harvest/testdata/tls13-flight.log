@@ -1,0 +1,24 @@
+
+=== www.google.com
+  -> ClientHello 1788 bytes
+  <- #1  Handshake        len= 1210  t=+26ms
+  <- #2  ChangeCipherSpec len=    1  t=+26ms
+  <- #3  ApplicationData  len= 4120  t=+26ms
+  == 3 records; the encrypted flight was 1 ApplicationData records totalling 4120 bytes
+
+=== www.cloudflare.com
+  -> ClientHello 1792 bytes
+  <- #1  Handshake        len= 1210  t=+14ms
+  <- #2  ChangeCipherSpec len=    1  t=+14ms
+  <- #3  ApplicationData  len= 2039  t=+17ms
+  == 3 records; the encrypted flight was 1 ApplicationData records totalling 2039 bytes
+
+=== www.microsoft.com
+  -> ClientHello 1759 bytes
+  <- #1  Handshake        len= 1210  t=+24ms
+  <- #2  ChangeCipherSpec len=    1  t=+25ms
+  <- #3  ApplicationData  len=   36  t=+25ms
+  <- #4  ApplicationData  len= 8268  t=+55ms
+  <- #5  ApplicationData  len=  281  t=+55ms
+  <- #6  ApplicationData  len=   69  t=+55ms
+  == 6 records; the encrypted flight was 4 ApplicationData records totalling 8654 bytes

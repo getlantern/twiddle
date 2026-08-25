@@ -1,0 +1,56 @@
+=== Is headless Chrome's ClientHello the same as headful? ===
+Chrome 151.0.7922.174, macOS. Same JS-free page (8 <img> tags) for every arm, so
+the only variable is browser mode and profile state. Comparison normalises
+everything Chrome varies per connection: extension ORDER, GREASE values,
+ClientHello.random, session_id contents, key_share key material, ECH padding,
+PSK. 21 fields compared (cipher suites, extension-id set, supported_groups,
+supported_versions, sig_algs, ALPN, psk_kex_modes, compress_cert,
+ec_point_formats, key_share groups+lengths, legacy_version, compression, and
+lengths of the stable extensions).
+
+  arm                    hellos            distinct full-hello signatures
+  headful-userprofile     8 (2 full)        1
+  headful-fresh          13 (9 full)        1
+  headless-new           10 (6 full)        1
+  headless-warm          15 (11 full)       1
+
+RESULT 1 -- headless=new vs headful, both on a FRESH profile:
+  NO STRUCTURAL DIFFERENCE across all 21 fields.
+
+RESULT 2 -- both fresh-profile arms vs the established user profile:
+  differ in exactly one field: extension 0x12e0 (len 2, content 0x1f40 = 8000)
+  is PRESENT with the established profile, ABSENT with a fresh one.
+
+RESULT 3 -- warming a fresh profile with a real-site visit (example.com, 7.0M
+  profile) did NOT restore 0x12e0. So it is not first-run state and not simple
+  browsing history; most plausibly a field trial delivered by the variations
+  seed, which a short-lived profile never receives.
+
+CONCLUSION: headless is safe -- it is not the variable. PROFILE STATE is. A CI
+job capturing from fresh profiles will systematically emit only the
+"without-0x12e0" variant of the population.
+
+OPEN: what 0x12e0 is, and what fraction of real Chrome installs send it.
+
+=== RESOLVED: 0x12e0 is TLSEXT_TYPE_server_padding ===
+BoringSSL include/openssl/tls1.h:
+    // Extension allowing the server to add additional bytes of padding to
+    // EncryptedExtensions.
+    // This is not an IANA defined extension number
+    #define TLSEXT_TYPE_server_padding 4832        // 4832 == 0x12e0
+
+ssl/extensions.cc semantics:
+  - ClientHello payload is a 2-byte requested padding size. Chrome sends 8000.
+  - Server replies in ENCRYPTED EXTENSIONS with that many zero bytes.
+  - kMaxServerPadding = 16*1024; a larger request gets no padding at all.
+  - Suppressed on resumption:  if (ssl->s3->session_reused) return true;
+  - Client verifies the echoed length matches exactly, else SSL_AD_DECODE_ERROR.
+  - Gated on hs->config->server_padding_request.has_value() -- an embedder
+    (Chrome) config, which is why it tracks profile/variations state.
+
+Capture confirms the client sends the request on BOTH full and resumption
+hellos, always 8000:
+  conn #1 full   8000     conn #5 RESUME 8000
+  conn #2 full   8000     conn #6 RESUME 8000
+  conn #3 RESUME 8000     conn #7 RESUME 8000
+  conn #4 RESUME 8000     conn #8 RESUME 8000

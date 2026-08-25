@@ -1,0 +1,37 @@
+LISTENING
+  captured #1  sni="a.localhost"  1765 bytes
+  captured #2  sni="a-much-longer-name.localhost"  1846 bytes
+
+=== A: sni="a.localhost" len=1765   B: sni="a-much-longer-name.localhost" len=1846   (sni delta +17)
+    length delta B-A = +81
+
+=== harvest A -> retarget to B's SNI, auth carrier = (none)
+  ours=1782 bytes  chrome-to-B=1846 bytes  delta=-64   sni="a-much-longer-name.localhost"
+  cipher order == chrome-to-B: true
+  ext order    == chrome-to-B: false
+    chrome: 0a0a ff01 0010 44cd 000a fe0d 0012 12e0 000d 000b 0005 0023 0000 0033 001b 002d 0017 002b 0a0a
+    ours  : 0a0a 0012 0033 000a 0017 002b 000d 000b ff01 0023 0000 fe0d 001b 002d 12e0 44cd 0005 0010 0a0a
+    (A's order was: 0a0a 0012 0033 000a 0017 002b 000d 000b ff01 0023 0000 fe0d 001b 002d 12e0 44cd 0005 0010 0a0a)
+  emission length stable over 16 runs: true
+
+=== harvest A -> retarget to B's SNI, auth carrier = random
+  ours=1782 bytes  chrome-to-B=1846 bytes  delta=-64   sni="a-much-longer-name.localhost"
+  cipher order == chrome-to-B: true
+  ext order    == chrome-to-B: false
+    chrome: 0a0a ff01 0010 44cd 000a fe0d 0012 12e0 000d 000b 0005 0023 0000 0033 001b 002d 0017 002b 0a0a
+    ours  : 0a0a 0012 0033 000a 0017 002b 000d 000b ff01 0023 0000 fe0d 001b 002d 12e0 44cd 0005 0010 0a0a
+    (A's order was: 0a0a 0012 0033 000a 0017 002b 000d 000b ff01 0023 0000 fe0d 001b 002d 12e0 44cd 0005 0010 0a0a)
+  emission length stable over 16 runs: true
+  auth 32B found at offset 11 (expected random=11, session_id=44): true
+  auth bytes constant across emissions (not re-randomised): true
+
+=== harvest A -> retarget to B's SNI, auth carrier = session_id
+  ours=1782 bytes  chrome-to-B=1846 bytes  delta=-64   sni="a-much-longer-name.localhost"
+  cipher order == chrome-to-B: true
+  ext order    == chrome-to-B: false
+    chrome: 0a0a ff01 0010 44cd 000a fe0d 0012 12e0 000d 000b 0005 0023 0000 0033 001b 002d 0017 002b 0a0a
+    ours  : 0a0a 0012 0033 000a 0017 002b 000d 000b ff01 0023 0000 fe0d 001b 002d 12e0 44cd 0005 0010 0a0a
+    (A's order was: 0a0a 0012 0033 000a 0017 002b 000d 000b ff01 0023 0000 fe0d 001b 002d 12e0 44cd 0005 0010 0a0a)
+  emission length stable over 16 runs: true
+  auth 32B found at offset 44 (expected random=11, session_id=44): true
+  auth bytes constant across emissions (not re-randomised): true

@@ -1,0 +1,42 @@
+LISTENING
+  captured #1  sni="c.localhost"  1829 bytes
+  captured #2  sni="a-considerably-longer-hostname.localhost"  1794 bytes
+
+=== A: sni="c.localhost" len=1829   B: sni="a-considerably-longer-hostname.localhost" len=1794   (sni delta +29)
+    length delta B-A = -35
+
+=== per-extension length: chrome->A vs chrome->B
+    ext 0xfe0d  A= 282  B= 218  delta=-64
+    ext 0x0000  A=  16  B=  45  delta=+29
+    ---- extension deltas sum: -35   (whole-hello delta -35)
+
+=== harvest A -> retarget to B's SNI, auth carrier = (none)
+  ours=1858 bytes  chrome-to-B=1794 bytes  delta=+64   sni="a-considerably-longer-hostname.localhost"
+  cipher order == chrome-to-B: true
+  ext order    == chrome-to-B: false
+    chrome: 0a0a 12e0 0033 0010 ff01 000d 001b 000b 002b fe0d 0017 0000 44cd 000a 002d 0005 0012 0023 0a0a
+    ours  : 0a0a 002d 002b fe0d 0010 000a 0017 000b 0000 0033 0005 000d 0023 001b 12e0 44cd ff01 0012 0a0a
+    (A's order was: 0a0a 002d 002b fe0d 0010 000a 0017 000b 0000 0033 0005 000d 0023 001b 12e0 44cd ff01 0012 0a0a)
+  emission length stable over 16 runs: true
+
+=== harvest A -> retarget to B's SNI, auth carrier = random
+  ours=1858 bytes  chrome-to-B=1794 bytes  delta=+64   sni="a-considerably-longer-hostname.localhost"
+  cipher order == chrome-to-B: true
+  ext order    == chrome-to-B: false
+    chrome: 0a0a 12e0 0033 0010 ff01 000d 001b 000b 002b fe0d 0017 0000 44cd 000a 002d 0005 0012 0023 0a0a
+    ours  : 0a0a 002d 002b fe0d 0010 000a 0017 000b 0000 0033 0005 000d 0023 001b 12e0 44cd ff01 0012 0a0a
+    (A's order was: 0a0a 002d 002b fe0d 0010 000a 0017 000b 0000 0033 0005 000d 0023 001b 12e0 44cd ff01 0012 0a0a)
+  emission length stable over 16 runs: true
+  auth 32B found at offset 11 (expected random=11, session_id=44): true
+  auth bytes constant across emissions (not re-randomised): true
+
+=== harvest A -> retarget to B's SNI, auth carrier = session_id
+  ours=1858 bytes  chrome-to-B=1794 bytes  delta=+64   sni="a-considerably-longer-hostname.localhost"
+  cipher order == chrome-to-B: true
+  ext order    == chrome-to-B: false
+    chrome: 0a0a 12e0 0033 0010 ff01 000d 001b 000b 002b fe0d 0017 0000 44cd 000a 002d 0005 0012 0023 0a0a
+    ours  : 0a0a 002d 002b fe0d 0010 000a 0017 000b 0000 0033 0005 000d 0023 001b 12e0 44cd ff01 0012 0a0a
+    (A's order was: 0a0a 002d 002b fe0d 0010 000a 0017 000b 0000 0033 0005 000d 0023 001b 12e0 44cd ff01 0012 0a0a)
+  emission length stable over 16 runs: true
+  auth 32B found at offset 44 (expected random=11, session_id=44): true
+  auth bytes constant across emissions (not re-randomised): true

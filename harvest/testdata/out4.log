@@ -1,0 +1,49 @@
+LISTENING 127.0.0.1:8443
+
+=== CAPTURED 1795 bytes  sni="localhost"
+ciphers (16): 0xcaca 0x1301 0x1302 0x1303 0xc02b 0xc02f 0xc02c 0xc030 0xcca9 0xcca8 0xc013 0xc014 0x009c 0x009d 0x002f 0x0035
+extensions (19, in order): 0x7a7a 0xff01 0x000a 0x0023 0x0005 0x000b 0x0012 0x0000 0x002b 0x44cd 0xfe0d 0x0017 0x002d 0x000d 0x0033 0x12e0 0x001b 0x0010 0x8a8a
+
+=== Q1: FingerprintClientHello, strict (AllowBluntMimicry=false)
+  ERROR: unsupported extension 4832
+  -> the fingerprinter is STALE for this browser's hello
+
+=== retrying with AllowBluntMimicry=true
+  OK with blunt mimicry (unknown extensions passed through verbatim)
+
+=== Q2: re-emit via ApplyPreset and diff
+  original : 1795 bytes, 16 ciphers, 19 extensions
+  re-emitted: 1795 bytes, 16 ciphers, 19 extensions
+
+  cipher order identical (GREASE-masked):    true
+  extension order identical (GREASE-masked): true
+
+  --- byte-level diff, differing runs ---
+    [  11..  43] 32 bytes  client random (MUST differ)   <- expected
+    [  44..  76] 32 bytes  session_id (MUST differ)      <- expected
+    [  78..  80]  2 bytes  extension/cipher body         <- CHECK
+    [ 114.. 116]  2 bytes  extension/cipher body         <- CHECK
+    [ 129.. 131]  2 bytes  extension/cipher body         <- CHECK
+    [ 185.. 187]  2 bytes  extension/cipher body         <- CHECK
+    [ 209.. 210]  1 bytes  extension/cipher body         <- CHECK
+    [ 212.. 244] 32 bytes  extension/cipher body         <- CHECK
+    [ 246.. 295] 49 bytes  extension/cipher body         <- CHECK
+    [ 296.. 454] 158 bytes  extension/cipher body         <- CHECK
+    [ 498.. 500]  2 bytes  extension/cipher body         <- CHECK
+    [ 507.. 557] 50 bytes  extension/cipher body         <- CHECK
+    [ 558.. 639] 81 bytes  extension/cipher body         <- CHECK
+    [ 640.. 833] 193 bytes  extension/cipher body         <- CHECK
+    [ 834.. 848] 14 bytes  extension/cipher body         <- CHECK
+    [ 849..1047] 198 bytes  extension/cipher body         <- CHECK
+    [1048..1258] 210 bytes  extension/cipher body         <- CHECK
+    [1259..1262]  3 bytes  extension/cipher body         <- CHECK
+    [1263..1723] 460 bytes  extension/cipher body         <- CHECK
+    [1727..1759] 32 bytes  extension/cipher body         <- CHECK
+    [1790..1792]  2 bytes  extension/cipher body         <- CHECK
+
+    21 differing runs total
+
+  --- structural divergence (orig vs ours, minus our own self-variance) ---
+    our two emissions: len 1795 vs 1795
+    8 bytes differ structurally — offsets: [185 186 788 933 1194 1423 1790 1791]
+    -> re-emission INVENTS a fingerprint. Not safe to use as-is.

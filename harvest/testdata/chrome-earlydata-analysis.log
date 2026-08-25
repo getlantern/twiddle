@@ -1,0 +1,15 @@
+upstream: openssl s_server -tls1_3 -early_data -num_tickets 2  (advertises max_early_data_size)
+
+  conn #1 full    1827B  no early_data   
+  conn #2 full    1827B  no early_data   
+  conn #3 RESUME  1842B  no early_data     PSK 75B (ticket 32B, binder 32B)
+  conn #4 RESUME  1810B  no early_data     PSK 75B (ticket 32B, binder 32B)
+  conn #5 RESUME  1906B  no early_data     PSK 75B (ticket 32B, binder 32B)
+  conn #6 RESUME  1874B  no early_data     PSK 75B (ticket 32B, binder 32B)
+  conn #7 RESUME  1906B  no early_data     PSK 75B (ticket 32B, binder 32B)
+  conn #8 RESUME  1842B  no early_data     PSK 75B (ticket 32B, binder 32B)
+  conn #9 RESUME  1874B  no early_data     PSK 75B (ticket 32B, binder 32B)
+  conn #10 RESUME  1906B  no early_data     PSK 75B (ticket 32B, binder 32B)
+
+>>> early_data (0x002a) offered by Chrome on any connection: False
+>>> resumption hellos: 8 / 10

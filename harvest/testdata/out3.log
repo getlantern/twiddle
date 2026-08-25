@@ -1,0 +1,47 @@
+LISTENING 127.0.0.1:8443
+
+=== CAPTURED 1731 bytes  sni="localhost"
+ciphers (16): 0x7a7a 0x1301 0x1302 0x1303 0xc02b 0xc02f 0xc02c 0xc030 0xcca9 0xcca8 0xc013 0xc014 0x009c 0x009d 0x002f 0x0035
+extensions (19, in order): 0x8a8a 0x0010 0x12e0 0x44cd 0x002b 0x0012 0x0000 0x002d 0xfe0d 0x0017 0x001b 0x000d 0x000a 0x0005 0xff01 0x0033 0x000b 0x0023 0x6a6a
+
+=== Q1: FingerprintClientHello, strict (AllowBluntMimicry=false)
+  ERROR: unsupported extension 4832
+  -> the fingerprinter is STALE for this browser's hello
+
+=== retrying with AllowBluntMimicry=true
+  OK with blunt mimicry (unknown extensions passed through verbatim)
+
+=== Q2: re-emit via ApplyPreset and diff
+  original : 1731 bytes, 16 ciphers, 19 extensions
+  re-emitted: 1731 bytes, 16 ciphers, 19 extensions
+
+  cipher order identical (GREASE-masked):    true
+  extension order identical (GREASE-masked): true
+
+  --- byte-level diff, differing runs ---
+    [  11..  43] 32 bytes  client random (MUST differ)   <- expected
+    [  44..  51]  7 bytes  session_id (MUST differ)      <- expected
+    [  52..  69] 17 bytes  session_id (MUST differ)      <- expected
+    [  70..  76]  6 bytes  session_id (MUST differ)      <- expected
+    [  78..  80]  2 bytes  extension/cipher body         <- CHECK
+    [ 114.. 116]  2 bytes  extension/cipher body         <- CHECK
+    [ 156.. 158]  2 bytes  extension/cipher body         <- CHECK
+    [ 199.. 200]  1 bytes  extension/cipher body         <- CHECK
+    [ 202.. 234] 32 bytes  extension/cipher body         <- CHECK
+    [ 236.. 311] 75 bytes  extension/cipher body         <- CHECK
+    [ 312.. 380] 68 bytes  extension/cipher body         <- CHECK
+    [ 425.. 427]  2 bytes  extension/cipher body         <- CHECK
+    [ 455.. 457]  2 bytes  extension/cipher body         <- CHECK
+    [ 464.. 724] 260 bytes  extension/cipher body         <- CHECK
+    [ 725.. 948] 223 bytes  extension/cipher body         <- CHECK
+    [ 949.. 979] 30 bytes  extension/cipher body         <- CHECK
+    [ 980..1203] 223 bytes  extension/cipher body         <- CHECK
+    [1204..1276] 72 bytes  extension/cipher body         <- CHECK
+    [1277..1497] 220 bytes  extension/cipher body         <- CHECK
+    [1498..1582] 84 bytes  extension/cipher body         <- CHECK
+    [1583..1669] 86 bytes  extension/cipher body         <- CHECK
+    [1670..1680] 10 bytes  extension/cipher body         <- CHECK
+    [1684..1716] 32 bytes  extension/cipher body         <- CHECK
+    [1726..1728]  2 bytes  extension/cipher body         <- CHECK
+
+    24 differing runs total

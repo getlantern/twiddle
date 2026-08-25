@@ -1,0 +1,10 @@
+# built tool binaries
+harvest/cmd/*/harvest
+harvest/cmd/*/sweep
+harvest/cmd/*/flight
+harvest/cmd/*/capture
+harvest/cmd/*/tapproxy
+harvest/cmd/*/resume
+bin/
+# locally generated certs -- the key is private, regenerate with mkcert
+harvest/testdata/*.pem

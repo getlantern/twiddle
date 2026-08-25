@@ -1,0 +1,30 @@
+=== Does Chrome offer early_data (0-RTT)? ===
+upstream: openssl s_server -tls1_3 -early_data -WWW -num_tickets 2
+control  : server advertises Max Early Data: 16384
+control  : openssl s_client -early_data -> "Early data was accepted"   (so 0-RTT works here)
+
+  conn #1 full    1827B  no early_data
+  conn #2 full    1827B  no early_data
+  conn #3 RESUME  1842B  no early_data   PSK 75B (ticket 32B, binder 32B)
+  conn #4 RESUME  1810B  no early_data   PSK 75B
+  conn #5 RESUME  1906B  no early_data   PSK 75B
+  conn #6 RESUME  1874B  no early_data   PSK 75B
+  conn #7 RESUME  1906B  no early_data   PSK 75B
+  conn #8 RESUME  1842B  no early_data   PSK 75B
+  conn #9 RESUME  1874B  no early_data   PSK 75B
+  conn #10 RESUME 1906B  no early_data   PSK 75B
+
+Chrome offered early_data on 0 of 8 resumptions.
+
+=== Do real sites advertise max_early_data_size? ===
+  www.google.com       ticket ✓   max_early_data=14336
+  www.cloudflare.com   ticket ✓   max_early_data=0
+  www.microsoft.com    ticket ✓   max_early_data=0
+  github.com           ticket ✓   max_early_data=0
+  www.wikipedia.org    ticket ✓   max_early_data=0
+  www.amazon.com       ticket ✓   max_early_data=0
+  www.facebook.com     ticket ✓   max_early_data=4294967295 (0xffffffff)
+
+NOTE: an earlier run of this sweep reported all-zero because it was wrapped in
+`timeout`, which does not exist on macOS -- the command never ran. Do not wrap
+these probes in `timeout`.

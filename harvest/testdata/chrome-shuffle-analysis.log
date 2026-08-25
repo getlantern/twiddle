@@ -1,0 +1,49 @@
+=== per-connection extension ORDER (is Chrome shuffling every connection?) ===
+
+conn #1 full    1763B  order=GREASE key_share status_request supported_groups SCT supported_versions …
+conn #2 full    1763B  order=GREASE ALPN application_settings_new server_name status_request encrypted_client_hello …
+conn #3 RESUME  1915B  order=GREASE compress_certificate status_request encrypted_client_hello supported_versions ALPN …
+conn #4 RESUME  1915B  order=GREASE supported_versions status_request compress_certificate ext_0x12e0 ALPN …
+conn #5 RESUME  1883B  order=GREASE compress_certificate encrypted_client_hello ALPN key_share extended_master_secret …
+conn #6 RESUME  1979B  order=GREASE extended_master_secret ec_point_formats key_share supported_versions SCT …
+conn #7 RESUME  1979B  order=GREASE psk_key_exchange_modes status_request ALPN extended_master_secret ec_point_formats …
+conn #8 RESUME  1979B  order=GREASE compress_certificate session_ticket psk_key_exchange_modes key_share signature_algorithms …
+
+distinct extension orderings across 8 connections: 8
+  conns [1]
+  conns [2]
+  conns [3]
+  conns [4]
+  conns [5]
+  conns [6]
+  conns [7]
+  conns [8]
+
+=== two FULL hellos compared to each other ===
+  sizes 1763 vs 1763   same order? False   identical bytes? False
+
+=== PSK extension across the 6 resumption hellos ===
+  conn #3: total  1915B   PSK  148B (ticket 105B, binder 32B)   ECH 218B
+  conn #4: total  1915B   PSK  148B (ticket 105B, binder 32B)   ECH 218B
+  conn #5: total  1883B   PSK  148B (ticket 105B, binder 32B)   ECH 186B
+  conn #6: total  1979B   PSK  148B (ticket 105B, binder 32B)   ECH 282B
+  conn #7: total  1979B   PSK  148B (ticket 105B, binder 32B)   ECH 282B
+  conn #8: total  1979B   PSK  148B (ticket 105B, binder 32B)   ECH 282B
+
+=== does PSK + ECH growth account for the size delta? ===
+  conn #3: delta  +152 = PSK +152 +0 (ECH)  -> residual +0
+  conn #4: delta  +152 = PSK +152 +0 (ECH)  -> residual +0
+  conn #5: delta  +120 = PSK +152 -32 (ECH)  -> residual +0
+  conn #6: delta  +216 = PSK +152 +64 (ECH)  -> residual +0
+  conn #7: delta  +216 = PSK +152 +64 (ECH)  -> residual +0
+  conn #8: delta  +216 = PSK +152 +64 (ECH)  -> residual +0
+
+=== session_id (legacy) across connections ===
+  conn #1: session_id 32B
+  conn #2: session_id 32B
+  conn #3: session_id 32B
+  conn #4: session_id 32B
+  conn #5: session_id 32B
+  conn #6: session_id 32B
+  conn #7: session_id 32B
+  conn #8: session_id 32B

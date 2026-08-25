@@ -1,0 +1,48 @@
+LISTENING 127.0.0.1:8443
+
+=== CAPTURED 1827 bytes  sni="localhost"
+ciphers (16): 0xcaca 0x1301 0x1302 0x1303 0xc02b 0xc02f 0xc02c 0xc030 0xcca9 0xcca8 0xc013 0xc014 0x009c 0x009d 0x002f 0x0035
+extensions (19, in order): 0x3a3a 0x12e0 0x0033 0x0010 0x000a 0x0000 0xff01 0x002b 0x000d 0x001b 0x44cd 0x0017 0xfe0d 0x0023 0x002d 0x0012 0x000b 0x0005 0x4a4a
+
+=== Q1: FingerprintClientHello, strict (AllowBluntMimicry=false)
+  ERROR: unsupported extension 4832
+  -> the fingerprinter is STALE for this browser's hello
+
+=== retrying with AllowBluntMimicry=true
+  OK with blunt mimicry (unknown extensions passed through verbatim)
+
+=== Q2: re-emit via ApplyPreset and diff
+  original : 1827 bytes, 16 ciphers, 19 extensions
+  re-emitted: 1827 bytes, 16 ciphers, 19 extensions
+
+  cipher order identical (GREASE-masked):    true
+  extension order identical (GREASE-masked): true
+
+  --- byte-level diff, differing runs ---
+    [  11..  43] 32 bytes  client random (MUST differ)   <- expected
+    [  44..  51]  7 bytes  session_id (MUST differ)      <- expected
+    [  52..  76] 24 bytes  session_id (MUST differ)      <- expected
+    [  78..  80]  2 bytes  extension/cipher body         <- CHECK
+    [ 114.. 116]  2 bytes  extension/cipher body         <- CHECK
+    [ 130.. 132]  2 bytes  extension/cipher body         <- CHECK
+    [ 139.. 419] 280 bytes  extension/cipher body         <- CHECK
+    [ 420.. 579] 159 bytes  extension/cipher body         <- CHECK
+    [ 580..1269] 689 bytes  extension/cipher body         <- CHECK
+    [1270..1355] 85 bytes  extension/cipher body         <- CHECK
+    [1359..1391] 32 bytes  extension/cipher body         <- CHECK
+    [1415..1417]  2 bytes  extension/cipher body         <- CHECK
+    [1453..1455]  2 bytes  extension/cipher body         <- CHECK
+    [1516..1517]  1 bytes  extension/cipher body         <- CHECK
+    [1519..1551] 32 bytes  extension/cipher body         <- CHECK
+    [1553..1652] 99 bytes  extension/cipher body         <- CHECK
+    [1653..1793] 140 bytes  extension/cipher body         <- CHECK
+    [1822..1824]  2 bytes  extension/cipher body         <- CHECK
+
+    18 differing runs total
+
+  --- structural divergence (orig vs ours, minus self-variance over 16 emissions) ---
+    bytes that vary across our own emissions: 1597 of 1827
+
+    *** ZERO structural divergence ***
+    Every differing byte is a field that must be fresh per connection.
+    The re-emitted hello is fingerprint-identical to the browser's.

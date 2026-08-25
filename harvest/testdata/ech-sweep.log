@@ -1,0 +1,9 @@
+LISTENING
+  #1 sni="same-name.localhost"                      hello=1773  ECH(0xfe0d)=218
+  #2 sni="same-name.localhost"                      hello=1773  ECH(0xfe0d)=218
+  #3 sni="same-name.localhost"                      hello=1805  ECH(0xfe0d)=250
+  #4 sni="same-name.localhost"                      hello=1741  ECH(0xfe0d)=186
+  #5 sni="same-name.localhost"                      hello=1805  ECH(0xfe0d)=250
+  #6 sni="same-name.localhost"                      hello=1773  ECH(0xfe0d)=218
+  #7 sni="same-name.localhost"                      hello=1773  ECH(0xfe0d)=218
+  #8 sni="same-name.localhost"                      hello=1741  ECH(0xfe0d)=186

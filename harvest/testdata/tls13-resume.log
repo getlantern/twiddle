@@ -1,0 +1,40 @@
+
+=== www.google.com
+  full handshake hello : 1484 bytes, 13 extensions
+  resumption hello     : 1761 bytes, 14 extensions   (DidResume=true)
+  delta                : +277 bytes
+  pre_shared_key (0x0029) = 273 bytes  [LAST extension, as required]
+     identity[0]: ticket 230 B, obfuscated_ticket_age 0xe1d51cc1
+     binder[0]:   32 B  (HMAC over truncated ClientHello -- unverifiable without the PSK)
+     framing overhead: 4 B
+  psk_key_exchange_modes (0x002d) present, 2 bytes
+
+=== www.cloudflare.com
+  full handshake hello : 1488 bytes, 13 extensions
+  resumption hello     : 1711 bytes, 14 extensions   (DidResume=true)
+  delta                : +223 bytes
+  pre_shared_key (0x0029) = 219 bytes  [LAST extension, as required]
+     identity[0]: ticket 176 B, obfuscated_ticket_age 0xbeeb1565
+     binder[0]:   32 B  (HMAC over truncated ClientHello -- unverifiable without the PSK)
+     framing overhead: 4 B
+  psk_key_exchange_modes (0x002d) present, 2 bytes
+
+=== www.microsoft.com
+  full handshake hello : 1487 bytes, 13 extensions
+  resumption hello     : 1806 bytes, 14 extensions   (DidResume=true)
+  delta                : +319 bytes
+  pre_shared_key (0x0029) = 315 bytes  [LAST extension, as required]
+     identity[0]: ticket 256 B, obfuscated_ticket_age 0x2fe65a16
+     binder[0]:   48 B  (HMAC over truncated ClientHello -- unverifiable without the PSK)
+     framing overhead: 4 B
+  psk_key_exchange_modes (0x002d) present, 2 bytes
+
+=== github.com
+  full handshake hello : 1480 bytes, 13 extensions
+  resumption hello     : 1559 bytes, 14 extensions   (DidResume=false)
+  delta                : +79 bytes
+  pre_shared_key (0x0029) = 75 bytes  [LAST extension, as required]
+     identity[0]: ticket 32 B, obfuscated_ticket_age 0xafb05358
+     binder[0]:   32 B  (HMAC over truncated ClientHello -- unverifiable without the PSK)
+     framing overhead: 4 B
+  psk_key_exchange_modes (0x002d) present, 2 bytes

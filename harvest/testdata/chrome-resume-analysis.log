@@ -1,0 +1,23 @@
+captured: 2 full-handshake hello(s), 6 resumption hello(s)
+
+full hello       : 1763 bytes, 19 extensions
+resumption hello : 1979 bytes, 20 extensions
+delta            : +216 bytes
+
+extensions added  : ['GREASE', 'GREASE', 'pre_shared_key']
+extensions removed: ['GREASE', 'GREASE']
+
+length changes among shared extensions:
+  encrypted_client_hello         218 ->   282
+
+extension ORDER:
+  full      : GREASE key_share status_request supported_groups SCT supported_versions server_name encrypted_client_hello ext_0x12e0 psk_key_exchange_modes session_ticket compress_certificate ec_point_formats ALPN signature_algorithms extended_master_secret 0xff01 application_settings_new GREASE
+  resumption: GREASE compress_certificate session_ticket psk_key_exchange_modes key_share signature_algorithms ext_0x12e0 encrypted_client_hello application_settings_new supported_versions supported_groups server_name 0xff01 status_request extended_master_secret SCT ALPN ec_point_formats GREASE pre_shared_key
+  pre_shared_key last? True
+
+pre_shared_key = 148 B  (+4 header = 152)
+observed delta = 216  ->  DOES NOT ACCOUNT FOR DELTA
+  ticket 105 B, obfuscated_ticket_age 0x7824128b
+  binder 32 B
+
+early_data (0-RTT): not offered
