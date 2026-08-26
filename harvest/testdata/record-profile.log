@@ -1,0 +1,20 @@
+flows: 1218   with application_data: 1077   handshake-only: 141
+application_data records: 26802  (client 6580, server 20222)
+
+=== client->server: 6580 records
+    min 19  p10 26  p25 53  median 87  p75 317  p90 777  p99 3672  max 16408
+    >=16000 B: 0.1%    <=100 B: 59.0%
+    most common sizes: [(87, 684), (26, 667), (53, 611), (34, 456), (30, 283), (69, 170), (63, 147), (94, 117)]
+    inter-record gap us: median 606  p90 138023  (same-ms: 51%)
+
+=== server->client: 20222 records
+    min 18  p10 34  p25 174  median 1387  p75 1395  p90 16401  p99 16401  max 16408
+    >=16000 B: 14.3%    <=100 B: 23.0%
+    most common sizes: [(1395, 5347), (16401, 2820), (26, 1389), (1386, 709), (53, 484), (34, 409), (57, 396), (1387, 357)]
+    inter-record gap us: median 0  p90 32762  (same-ms: 72%)
+
+app records per flow: median 12  p90 45  max 396
+flows with <=2 app records: 9%
+
+=== candidate padding buckets (cover 90% of records, chosen from real modes) ===
+    [34, 69, 600, 1395, 16401, 16408]

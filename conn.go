@@ -30,9 +30,14 @@ import (
 //	inner  = payload ‖ content_type:1 ‖ zeros(padding)
 
 const (
-	recordHeaderLen  = 5
-	maxPlaintext     = 1 << 14
-	maxCiphertext    = maxPlaintext + 256
+	recordHeaderLen = 5
+	// maxPlaintext is the largest content a record may carry. TLSInnerPlaintext
+	// adds the content-type byte on top, so inner tops out at maxPlaintext+1 and
+	// the wire record at maxPlaintext+1+16 = 16401 -- which is exactly the
+	// max-size mode observed in real traffic.
+	maxPlaintext  = 1 << 14
+	maxInner      = maxPlaintext + 1
+	maxCiphertext = maxPlaintext + 256
 	contentAppData   = 0x17
 	contentAlert     = 0x15
 	contentHandshake = 0x16
@@ -153,8 +158,8 @@ func (c *Conn) Write(b []byte) (int, error) {
 	written := 0
 	for len(b) > 0 {
 		n := len(b)
-		if n > maxPlaintext-1 {
-			n = maxPlaintext - 1
+		if n > maxPlaintext {
+			n = maxPlaintext
 		}
 		if err := c.writeRecord(contentAppData, b[:n]); err != nil {
 			return written, err
@@ -170,7 +175,7 @@ func (c *Conn) writeRecord(typ byte, payload []byte) error {
 	inner = append(inner, payload...)
 	inner = append(inner, typ)
 	if c.pad != nil {
-		if target := c.pad(len(payload)); target > len(inner) && target <= maxPlaintext {
+		if target := c.pad(len(payload)); target > len(inner) && target <= maxInner {
 			inner = append(inner, make([]byte, target-len(inner))...)
 		}
 	}

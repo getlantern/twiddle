@@ -87,10 +87,32 @@ The shaping layer must at minimum:
   human-driven timing already present in the stream, which is a stronger defence than any jitter we could
   synthesise (see [traffic-analysis.md](traffic-analysis.md))
 
-And the target distribution should be *measured*, not guessed. The flight measurements in
-`harvest/testdata/tls13-flight.log` cover only the handshake; **steady-state browsing record sizes are not
-yet measured**, and that is the input this layer needs. `harvest/cmd/tapproxy` already sits in the right
-place to collect it.
+### Measured
+
+26,802 `application_data` records across 1,077 real browsing flows
+(`harvest/cmd/records`, `harvest/testdata/record-profile.log`):
+
+| | median | ≤100 B | at max | dominant mode |
+|---|---|---|---|---|
+| client → server | 87 B | **59%** | 0.1% | 87, 26, 53, 34 |
+| server → client | 1387 B | 23% | **14.3%** | **1395 B** (5,347 of 20,222) |
+
+Two things shape the Padder. **Server traffic is strongly bimodal** — an MTU-sized mode at 1395 bytes and a
+max-record mode at 16401 — while **client traffic is almost all small h2 control frames**. And the ratio is
+**3:1 server to client**, which is what browsing looks like.
+
+Timing is bursty in both directions: 72% of server records arrive in the same millisecond as the previous
+one, median inter-record gap 0 µs.
+
+`BrowsingPadder` rounds up to the nearest measured mode per direction, and a test asserts that every padded
+record lands on a length that actually occurs in real traffic. Note the arithmetic: the wire length a censor
+reads is `inner + 16`, and TLSInnerPlaintext carries the content-type byte, so the max-size mode of 16401 is
+16384 content + 1 type + 16 tag. Getting that off by one puts every large record one byte outside the real
+distribution.
+
+**Still to build: coalescing.** Padding alone cannot merge two small writes into one record, and the failure
+mode named above -- one record per `Write` republishing the proxied protocol's framing -- is only half
+addressed until it does.
 
 ## Open
 
