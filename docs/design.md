@@ -247,3 +247,25 @@ different failure mode — but it is a different track, not this one.
 - Candidate pool for cover domains — ranked lists are enumerable by the censor, the long tail strains the
   splitter ([cover-domains.md](cover-domains.md)).
 - Whether cover domains should vary per connection rather than per server.
+
+## Phase 0 size deltas to close
+
+The spike emits a working opening, but two lengths do not yet match what was measured off real servers.
+
+**ClientHello: 2053 B emitted vs 1711–1806 B measured.** The gap is the ticket. Our 176-byte ticket
+replaces the 105-byte one Chrome received from Go's `crypto/tls` in the captures, and the captured hellos
+carry Chrome's larger base (ECH GREASE, PQ key share). The measurements make the rule clear:
+
+| Server | ticket issued | resulting resumption hello |
+|---|---|---|
+| cloudflare | 176 B | 1711 B |
+| google | 230 B | 1761 B |
+| microsoft | 256 B | 1806 B |
+
+**`TicketLen` therefore is not a free parameter — it should match what the impersonated cover identity's
+real server issues.** Claiming to be microsoft.com while presenting a 176-byte ticket is an inconsistency
+that costs nothing to avoid, and `harvest/cmd/resume` already measures the right value per host.
+
+**ServerHello: 1221 B synthesised vs 1210 B measured.** An 11-byte overshoot, small but unexplained — worth
+resolving before shipping, since the measured value was identical across all three servers and is therefore
+a tight target rather than a range.
