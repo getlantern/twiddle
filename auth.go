@@ -29,6 +29,13 @@ import (
 // either without the resumption secret, which makes them the only ClientHello
 // fields unverifiable by construction rather than by convention.
 //
+// KNOWN LIMITATION -- see docs/uniform-ephemeral.md. The ephemeral is written
+// into the ticket as a raw X25519 public key, and only about half of all field
+// elements are valid Curve25519 u-coordinates, so one Legendre-symbol test
+// distinguishes it from the uniform AEAD ciphertext a real ticket carries. The
+// top-bit bias below is fixed; curve membership is not. This must be resolved
+// before the transport ships.
+//
 // Deriving the MAC key from ECDH to the server's static key keeps the
 // verifiable-only-by-the-server property: no symmetric secret is shared across
 // clients, so extracting one client's state does not let a censor confirm
