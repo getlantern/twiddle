@@ -1,6 +1,7 @@
 package twiddle
 
 import (
+	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -160,4 +161,55 @@ func rerandECHGrease(e *Extension) error {
 	d = appendU16(d, uint16(len(payload)))
 	e.Data = append(d, payload...)
 	return nil
+}
+
+// Options configure a single emission of a harvested hello.
+type Options struct {
+	// CoverSNI replaces the harvested hello's server name.
+	CoverSNI string
+	// ServerStatic is the egress's long-term X25519 public key.
+	ServerStatic *ecdh.PublicKey
+	// TicketLen is the pre_shared_key ticket length. Real servers were measured
+	// at 32, 105, 176, 230 and 256 bytes; it should be stable per identity, since
+	// a server's ticket format does not vary connection to connection.
+	TicketLen int
+	// BinderLen must equal the hash length of the cipher suite the synthesised
+	// ServerHello selects: 32 for SHA-256, 48 for SHA-384.
+	BinderLen int
+}
+
+// Twiddle rewrites a harvested ClientHello for emission and returns the wire
+// bytes plus the ephemeral key the egress will agree on.
+//
+// The step order is load-bearing and is why this exists rather than callers
+// composing the pieces themselves:
+//
+//	SetSNI -> Rerandomize -> Shuffle -> SetPSKAuth
+//
+// The binder is a MAC over the hello truncated at the binders, so it must be
+// computed over the FINAL byte layout. Shuffling after authenticating changes
+// the transcript and silently invalidates the binder. Real TLS has the same
+// constraint: a client picks its extension order first and computes the binder
+// last.
+func Twiddle(harvested []byte, opt Options) (wire []byte, eph *ecdh.PrivateKey, err error) {
+	h, err := ParseClientHello(harvested)
+	if err != nil {
+		return nil, nil, err
+	}
+	if opt.CoverSNI != "" {
+		if err := h.SetSNI(opt.CoverSNI); err != nil {
+			return nil, nil, err
+		}
+	}
+	if err := h.Rerandomize(); err != nil {
+		return nil, nil, err
+	}
+	if err := h.Shuffle(); err != nil {
+		return nil, nil, err
+	}
+	eph, err = h.SetPSKAuth(opt.ServerStatic, opt.TicketLen, opt.BinderLen)
+	if err != nil {
+		return nil, nil, err
+	}
+	return h.Marshal(), eph, nil
 }

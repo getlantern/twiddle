@@ -207,6 +207,30 @@ starvation tension identified above resolves itself: there is nothing to starve 
 That is a real simplification — no dual-mode routing, no mode byte, no second code path — bought by a
 measurement that took an afternoon.
 
+### Outer resumption is a different thing, and it is ours
+
+The 4.1% is about **inner** handshakes — the browser reaching 254 destination origins. It says nothing about
+the **outer** connection to our own egress, which is a separate layer and behaves completely differently:
+
+| | inner (browser → destination) | outer (client → our egress) |
+|---|---|---|
+| who controls the ticket | the destination | **we do** |
+| measured/attainable resumption | **4.1%** | **~100%** |
+| what it affects | what the censor sees *encapsulated* | the shape of our theatrical opening |
+
+`getlantern/http-proxy` has run outer TLS resumption at scale for years and still carries substantial
+traffic — prior art worth reading before implementing the ticket path here. It is also a reason to keep the
+theatrical opening as a resumption hello: that decision does not depend on the 4.1%, and the operational
+half of it is already proven in production.
+
+**But do not carry the TLS version over.** http-proxy uses TLS 1.2, and for this transport 1.3 is strictly
+better: Xue's classifier is *more* precise against 1.2 (`Wb=5`, more consecutive elements must match, lower
+FPR) and the paper says explicitly that it is "in censors' interest to focus on TLS 1.2." TLS 1.2 also puts
+the certificate chain in cleartext, which is the entire fidelity problem the 1.3 theater design sidesteps.
+
+A separate TLS-1.2-shaped transport is a legitimate thing to want for diversity — different fingerprint,
+different failure mode — but it is a different track, not this one.
+
 ### Caveats on the number
 
 - Headless Chrome against ad-heavy Western sites. Much of the 254-origin tail is ad and analytics traffic.
