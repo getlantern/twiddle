@@ -1,3 +1,3 @@
 module github.com/getlantern/twiddle
 
-go 1.26.2
+go 1.25

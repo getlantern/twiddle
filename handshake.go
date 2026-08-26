@@ -2,12 +2,12 @@ package twiddle
 
 import (
 	"crypto/ecdh"
-	"math/big"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"time"
 )
@@ -37,7 +37,12 @@ type ServerConfig struct {
 	MaxAge    time.Duration
 	// TicketLen must be stable: a real server's ticket format does not vary.
 	TicketLen int
-	Shaper    Shaper
+	// PSKFirst places pre_shared_key before the other ServerHello extensions.
+	// Real servers differ but are individually consistent -- google and
+	// cloudflare put it first, microsoft, amazon and wikipedia last -- so this
+	// should be stable for a given cover identity.
+	PSKFirst bool
+	Shaper   Shaper
 }
 
 // Client opens a twiddle connection over raw.
@@ -129,6 +134,7 @@ func Server(raw net.Conn, cfg ServerConfig) (*Conn, error) {
 		SessionIDEcho:   h.SessionID,
 		CipherSuite:     TLS_AES_128_GCM_SHA256,
 		ServerEphemeral: priv.PublicKey(),
+		PSKFirst:        cfg.PSKFirst,
 	})
 	if err != nil {
 		return nil, err

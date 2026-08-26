@@ -95,10 +95,16 @@ func TestServerRejectsUnauthenticated(t *testing.T) {
 	badCred, _ := other.Issue(1, DefaultTicketLen)
 
 	cases := map[string]func(net.Conn){
-		"garbage":          func(c net.Conn) { c.Write([]byte("not a tls record at all")) },
-		"bare TLS hello":   func(c net.Conn) { c.Write(pool(t)[0]) },
-		"wrong ticket key": func(c net.Conn) { w, _, _ := Twiddle(pool(t)[0], Options{Credential: badCred, BinderLen: 32}); c.Write(w) },
-		"truncated":        func(c net.Conn) { w, _, _ := Twiddle(pool(t)[0], Options{Credential: badCred, BinderLen: 32}); c.Write(w[:40]) },
+		"garbage":        func(c net.Conn) { c.Write([]byte("not a tls record at all")) },
+		"bare TLS hello": func(c net.Conn) { c.Write(pool(t)[0]) },
+		"wrong ticket key": func(c net.Conn) {
+			w, _, _ := Twiddle(pool(t)[0], Options{Credential: badCred, BinderLen: 32})
+			c.Write(w)
+		},
+		"truncated": func(c net.Conn) {
+			w, _, _ := Twiddle(pool(t)[0], Options{Credential: badCred, BinderLen: 32})
+			c.Write(w[:40])
+		},
 	}
 	for name, send := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -263,4 +269,55 @@ func TestTicketLenForCover(t *testing.T) {
 			t.Errorf("%s: got %d, want %d", host, got, want)
 		}
 	}
+}
+
+// TestServerConfigPSKFirstReachesTheWire guards a dead-option bug: PSKFirst was
+// exposed in configuration but never threaded into the synthesised ServerHello,
+// so setting it did nothing at all.
+func TestServerConfigPSKFirstReachesTheWire(t *testing.T) {
+	h, err := ParseClientHello(pool(t)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	eph, err := h.SetKeyShare()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, first := range []bool{false, true} {
+		sh, err := SynthesizeServerHello(ServerHelloParams{
+			SessionIDEcho: h.SessionID, ServerEphemeral: eph.PublicKey(), PSKFirst: first,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		exts := serverHelloExtOrder(t, sh)
+		if len(exts) < 2 {
+			t.Fatalf("ServerHello has %d extensions", len(exts))
+		}
+		if first && exts[0] != ExtPreSharedKey {
+			t.Errorf("PSKFirst=true but the first extension is %#04x", exts[0])
+		}
+		if !first && exts[len(exts)-1] != ExtPreSharedKey {
+			t.Errorf("PSKFirst=false but the last extension is %#04x", exts[len(exts)-1])
+		}
+		if len(sh) != ServerHelloResumedLen {
+			t.Errorf("PSKFirst=%v changed the length to %d", first, len(sh))
+		}
+	}
+}
+
+func serverHelloExtOrder(t *testing.T, sh []byte) []uint16 {
+	t.Helper()
+	b := sh[9:]
+	p := 2 + 32
+	p += 1 + int(b[p])
+	p += 3
+	end := p + 2 + int(binary.BigEndian.Uint16(b[p:p+2]))
+	p += 2
+	var out []uint16
+	for p+4 <= end && p+4 <= len(b) {
+		out = append(out, binary.BigEndian.Uint16(b[p:p+2]))
+		p += 4 + int(binary.BigEndian.Uint16(b[p+2:p+4]))
+	}
+	return out
 }
