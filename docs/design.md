@@ -140,6 +140,44 @@ broader model that covers more. The result establishes *separation in the featur
 deployed system. Our burst inputs also come from socket reads rather than packet capture; burst aggregation
 sums consecutive same-direction bytes so it is robust to read coalescing, but it is still an approximation.
 
+## The tension nobody has priced: passthrough starves mux
+
+These two defences **compete for the same traffic**.
+
+Mux works by interleaving inner sessions so no clean burst triple forms — Xue measured TPR 0.13–0.18 at
+concurrency 8, and concurrency is the whole mechanism. But passthrough diverts every resumed TLS connection
+*away* from the wrapped tunnel. The better passthrough works, the thinner the mux tunnel gets, and the more
+legible the flows that remain in it.
+
+Taken to the limit: if passthrough carried everything except first-visit connections, the wrapped tunnel
+might carry one or two streams at a time — which is not multiplexed at all, and lands back at the
+0.74–0.88 TPR of the non-mux configurations.
+
+This is not a reason to drop either one, but it means the split point is a **tuning decision with a real
+optimum**, not a free architectural choice. Two things follow:
+
+- The wrapped tunnel must be **long-lived and shared across destinations**, so that even a modest arrival
+  rate accumulates concurrency. An AnyTLS-style warm pool is what makes this possible.
+- If measured concurrency in the wrapped tunnel falls below roughly Xue's 8, it may be **better to route
+  some resumed connections back into it** — sacrificing their individual realism to keep the mux dense
+  enough to protect the full handshakes that have nowhere else to go.
+
+## The number that decides whether this works
+
+**What fraction of real browsing connections are resumptions?**
+
+It is not a tuning parameter, it is the gating question, because it sets how much traffic each path carries:
+
+| If resumption share is… | Then |
+|---|---|
+| high (say ≥ 70%) | most traffic gets passthrough's structural defence; the wrapped tunnel is a minority path — but see the starvation tension above |
+| low (say ≤ 40%) | the majority of traffic sits on the wrapped path at TPR 0.13–0.18, and *"a censor only needs one flow"* |
+
+Our own captures show resumption in the majority once a session is warm (6/8 and 8/10) — but those are
+repeat connections to a **single origin**, which is the most favourable possible case. Real browsing spreads
+across 5–20 origins per page, each needing a first full handshake. **This number must be measured against
+real browsing before the design can be called sound.**
+
 ## Still open
 
 - The real-browsing resumption ratio, which sets how much traffic each path carries. Our captures show
