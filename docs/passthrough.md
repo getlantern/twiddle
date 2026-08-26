@@ -21,11 +21,16 @@ genuine TLS session, byte for byte.
 
 ## Why this is stronger than shaping
 
-It does not mitigate the Xue attack — it **dissolves** it.
+It does not eliminate the Xue signal, but it collapses the part of it that carries the information.
+
+A wrapped tunnel stacks **many** inner handshakes onto one long-lived outer connection — that repetition is
+the strong signal. Passthrough has **exactly one** encapsulated handshake per connection (the ClientHello we
+must wrap to hide the SNI), positioned at the front where a connection is expected to be handshaking anyway.
+Everything after it is the real session.
 
 | Problem | Wrapped tunnel | Passthrough |
 |---|---|---|
-| Inner-handshake burst | present, must be hidden | there is no *inner* handshake — it is the outer one |
+| Encapsulated handshakes per outer connection | **many**, one per inner session | **exactly one**, at the front |
 | Record sizes | ours, must be shaped | the real session's, exactly |
 | Inter-arrival timing | ours, must not regularise human entropy | **is** human entropy, untouched |
 | Multiple inner sessions stacked | the strongest Xue signal | 1:1 — one user session per connection |
@@ -78,16 +83,51 @@ immediately forwards. One RTT to first byte — the same as unproxied TLS.
 This makes the opening effectively 0-RTT, which means the replay cache in
 [authentication.md](https://github.com/getlantern/discovery-engine) is load-bearing rather than optional.
 
+## Detection is optional, and it is not a TUN feature
+
+An earlier draft of this document put passthrough behind TUN integration. That was wrong. Detection reads
+the **first bytes of the stream**, and sing-box already implements it:
+
+```go
+// common/sniff/tls.go — takes an io.Reader, not a TUN handle
+func TLSClientHello(ctx context.Context, metadata *adapter.InboundContext, reader io.Reader) error
+```
+
+Because it operates on an `io.Reader`, it is **inbound-agnostic** — SOCKS5, HTTP `CONNECT`, TUN, or
+transparent redirect all reach the outbound as a byte stream, and the first bytes either parse as a
+ClientHello or they do not. `lantern-box` inherits this from sing-box, so it is configuration rather than
+new work.
+
+Optionality then falls out at three independent levels:
+
+| Level | Mechanism | Effect |
+|---|---|---|
+| **Config** | `passthrough: false` | transport always uses the wrapped tunnel |
+| **Per connection** | first-bytes sniff | no valid ClientHello ⇒ wrapped. **Fail closed** |
+| **Negotiated** | server capability bit | egress without passthrough ⇒ client falls back |
+
+Two rules keep this safe:
+
+- **Require a successful parse with a usable SNI** before choosing passthrough. Ambiguity resolves to
+  wrapped, never the other way.
+- **Signal the mode explicitly** — a mode byte in the first wrapped record — rather than letting the proxy
+  infer it from whether the payload happens to parse. Inference invites a parser-differential bug where
+  client and proxy disagree about what the connection is.
+
+And a useful consequence of the split: **neither mode ever carries a repeated encapsulated TLS handshake.**
+TLS traffic goes passthrough, where the single handshake is the connection's own. Non-TLS traffic goes
+through the wrapped tunnel, where there is no inner TLS handshake to find because the payload is not TLS.
+
 ## What it costs
 
-- **Only covers TLS-bearing traffic.** Everything else still needs the wrapped tunnel, so `ordinary`
-  carries both modes and selects per connection.
-- **The client must parse the TUN stream** well enough to recognise a ClientHello and find its boundaries.
-  That is the same machinery as hello harvesting, so the work is shared — but it does move passthrough
-  behind the TUN integration that v1 was designed to avoid.
+- **Only covers TLS-bearing traffic.** Everything else uses the wrapped tunnel, so `ordinary` carries both
+  modes and selects per connection.
 - **The proxy must read the SNI to route**, as any proxy must.
 - **No shaping is possible** once passthrough begins. That is the point, but it means a flaw in the opening
   cannot be papered over downstream.
+- **Lazy dial.** Pipelining the theatrical hello with the wrapped inner hello means waiting for the
+  application's first write before dialling. Browsers write immediately, so the cost is negligible — and it
+  avoids opening connections that are never used.
 
 ## Residual risk
 
