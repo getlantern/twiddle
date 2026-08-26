@@ -28,7 +28,7 @@ type ClientConfig struct {
 	// connection with the one the server issues in its flight.
 	Credential *Credential
 	BinderLen  int
-	Padder     Padder
+	Shaper     Shaper
 }
 
 // ServerConfig is what an egress needs to accept one.
@@ -37,7 +37,7 @@ type ServerConfig struct {
 	MaxAge    time.Duration
 	// TicketLen must be stable: a real server's ticket format does not vary.
 	TicketLen int
-	Padder    Padder
+	Shaper    Shaper
 }
 
 // Client opens a twiddle connection over raw.
@@ -90,7 +90,7 @@ func Client(raw net.Conn, cfg ClientConfig) (*Conn, *Credential, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	conn, err := NewConn(raw, sess, true, cfg.Padder)
+	conn, err := NewConn(raw, sess, true, cfg.Shaper)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -148,7 +148,7 @@ func Server(raw net.Conn, cfg ServerConfig) (*Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	conn, err := NewConn(raw, sess, false, cfg.Padder)
+	conn, err := NewConn(raw, sess, false, cfg.Shaper)
 	if err != nil {
 		return nil, err
 	}

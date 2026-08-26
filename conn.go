@@ -97,21 +97,18 @@ func (k Keys) aead() (cipher.AEAD, error) {
 	return cipher.NewGCM(b)
 }
 
-// Padder chooses the padded inner length for a record carrying n payload bytes.
-// It is the shaping layer's hook: record sizes and timing are the entire
-// observable, so this is where traffic-analysis resistance lives or dies.
-// The default adds nothing.
-type Padder func(payload int) int
-
 // Conn is an authenticated, encrypted stream framed as TLS application_data.
 type Conn struct {
 	raw net.Conn
 
-	wmu     sync.Mutex
-	send    cipher.AEAD
-	sendIV  [12]byte
-	sendSeq uint64
-	pad     Padder
+	wmu      sync.Mutex
+	send     cipher.AEAD
+	sendIV   [12]byte
+	sendSeq  uint64
+	shaper   Shaper
+	wbuf     []byte
+	flushing bool
+	werr     error
 
 	rmu     sync.Mutex
 	recv    cipher.AEAD
@@ -122,7 +119,7 @@ type Conn struct {
 }
 
 // NewConn wraps raw. isClient selects which direction's keys are used to send.
-func NewConn(raw net.Conn, s *Session, isClient bool, pad Padder) (*Conn, error) {
+func NewConn(raw net.Conn, s *Session, isClient bool, sh Shaper) (*Conn, error) {
 	sendKeys, recvKeys := s.Client, s.Server
 	if !isClient {
 		sendKeys, recvKeys = s.Server, s.Client
@@ -135,9 +132,12 @@ func NewConn(raw net.Conn, s *Session, isClient bool, pad Padder) (*Conn, error)
 	if err != nil {
 		return nil, err
 	}
+	if sh == nil {
+		sh = PlainShaper()
+	}
 	return &Conn{
 		raw: raw, send: sa, sendIV: sendKeys.IV,
-		recv: ra, recvIV: recvKeys.IV, pad: pad,
+		recv: ra, recvIV: recvKeys.IV, shaper: sh,
 	}, nil
 }
 
@@ -152,32 +152,59 @@ func nonceFor(iv [12]byte, seq uint64) []byte {
 	return n
 }
 
+// Write queues b and drains the pending buffer through the shaper.
+//
+// Coalescing is opportunistic and adds NO delay: a caller whose bytes arrive
+// while another goroutine is mid-flush simply appends and returns, and the
+// in-flight flush carries them. So merging happens under real write pressure and
+// not on a clock. That distinction matters -- a fixed flush interval would be
+// exactly the "synchronized batching" that flow-physics classifiers key on, and
+// the human timing already in the stream is a better defence than any we could
+// synthesise (docs/traffic-analysis.md).
+//
+// A consequence: an error caused by bytes merged into someone else's flush is
+// reported to a later Write, as with any buffered writer.
 func (c *Conn) Write(b []byte) (int, error) {
 	c.wmu.Lock()
-	defer c.wmu.Unlock()
-	written := 0
-	for len(b) > 0 {
-		n := len(b)
-		if n > maxPlaintext {
-			n = maxPlaintext
-		}
-		if err := c.writeRecord(contentAppData, b[:n]); err != nil {
-			return written, err
-		}
-		written += n
-		b = b[n:]
+	if c.werr != nil {
+		err := c.werr
+		c.wmu.Unlock()
+		return 0, err
 	}
-	return written, nil
+	c.wbuf = append(c.wbuf, b...)
+	if c.flushing {
+		c.wmu.Unlock()
+		return len(b), nil
+	}
+	c.flushing = true
+	for len(c.wbuf) > 0 {
+		take, padTo := c.shaper.Next(len(c.wbuf))
+		if take <= 0 || take > len(c.wbuf) {
+			take = len(c.wbuf)
+		}
+		chunk := append([]byte(nil), c.wbuf[:take]...)
+		c.wbuf = c.wbuf[take:]
+		c.wmu.Unlock()
+		err := c.writeRecord(contentAppData, chunk, padTo)
+		c.wmu.Lock()
+		if err != nil {
+			c.flushing = false
+			c.werr = err
+			c.wmu.Unlock()
+			return 0, err
+		}
+	}
+	c.flushing = false
+	c.wmu.Unlock()
+	return len(b), nil
 }
 
-func (c *Conn) writeRecord(typ byte, payload []byte) error {
+func (c *Conn) writeRecord(typ byte, payload []byte, padTo int) error {
 	inner := make([]byte, 0, len(payload)+1)
 	inner = append(inner, payload...)
 	inner = append(inner, typ)
-	if c.pad != nil {
-		if target := c.pad(len(payload)); target > len(inner) && target <= maxInner {
-			inner = append(inner, make([]byte, target-len(inner))...)
-		}
+	if padTo > len(inner) && padTo <= maxInner {
+		inner = append(inner, make([]byte, padTo-len(inner))...)
 	}
 
 	hdr := []byte{contentAppData, 0x03, 0x03, 0, 0}

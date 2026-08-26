@@ -110,9 +110,32 @@ reads is `inner + 16`, and TLSInnerPlaintext carries the content-type byte, so t
 16384 content + 1 type + 16 tag. Getting that off by one puts every large record one byte outside the real
 distribution.
 
-**Still to build: coalescing.** Padding alone cannot merge two small writes into one record, and the failure
-mode named above -- one record per `Write` republishing the proxied protocol's framing -- is only half
-addressed until it does.
+### Padding alone is not enough — segment
+
+A pad-only shaper is not merely incomplete, it is actively harmful. A proxied connection carries *inner* TLS
+records, so an MTU-sized one arrives as ~1400 bytes. Padding that up to the next mode meant jumping from
+1379 to 16385 inner: **11.9x bandwidth amplification on the single most common payload size.**
+
+Real servers do not pad a 4 KB response up to 16 KB; they emit a run of 1395-byte records and a remainder.
+So `Shaper` decides *both* how much payload to take and what to pad it to. A 4000-byte write now costs
+**1.06x** instead of 11.9x, and every record still lands on a measured length.
+
+Bucket *spacing* turns out to matter as much as bucket choice. An initial eight-bucket list drawn from the
+top modes alone left a gap between 174 and 1386, so a 500-byte payload cost 2.8x. The shipped buckets pin
+the six most frequent sizes — including the 1395 server mode that is 26% of records — then fill gaps so no
+payload rounds up more than ~1.6x. Weighted by real frequency, expected overhead is **1.086x client and
+1.057x server**, with 49% and 66% of real records already landing exactly on a bucket.
+
+### Coalescing adds no delay, deliberately
+
+Writes queue and drain through the shaper; a caller whose bytes arrive while another goroutine is mid-flush
+appends and returns, and the in-flight flush carries them. **Merging therefore happens under real write
+pressure rather than on a clock.**
+
+That is the whole design constraint. A fixed flush interval would be exactly the "synchronized batching"
+flow-physics classifiers key on, and the human timing already present in the stream is a better defence than
+any we could synthesise. The cost is buffered-writer semantics: an error caused by bytes merged into another
+caller's flush surfaces on a later `Write`.
 
 ## Open
 
