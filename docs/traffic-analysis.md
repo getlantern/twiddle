@@ -6,6 +6,40 @@ attack surface and our design does **not** address it for free.
 
 ## The honest answer on TLS-in-TLS
 
+### What the attack actually does
+
+Read from the paper, not a summary. Each flow becomes a sequence of signed integers — magnitude is TCP
+payload size, sign is direction — plus inter-arrival times: `(+517, −1400, −1400, +80)`.
+
+**For TLS-cover flows the outer handshake is stripped first**, "in order to only identify handshakes that
+are encapsulated." Two classifiers then run, and a flow is flagged only if *both* fire:
+
+1. **Chi-squared over 3-grams** of discretised sizes. Sizes bucket into `|L|=4` groups chosen so that
+   ClientHello, ServerHello and ChangeCipherSpec land in distinct buckets; top `f=100` 3-grams;
+   observation window `Wo=25` packets.
+2. **Mahalanobis distance over bursts** — consecutive same-direction packets aggregated, because "each
+   phase of the TLS handshake typically forms its own burst." Window `Wb = 2×RT+1`: **5 for TLS 1.2,
+   3 for TLS 1.3.** Slides across the flow, takes the minimum distance.
+
+Deployed 30 days at Merit: 36 TB/day, 3.9M flows, **FPR 0.054%** on TLS.
+
+| Configuration | TPR |
+|---|---|
+| shadowsocks / vmess / vless / trojan | 0.74–0.85 |
+| httpt, Cloak, shadowTLS, gost | 0.69–0.88 |
+| obfs4 | 0.438 |
+| naiveproxy | 0.328 |
+| **MUX (concurrency 8)** | **0.125–0.18** |
+
+And the sting: *"a censor only needs to identify a single flow to block the corresponding proxy server."*
+A TPR of 0.13 is still fatal across enough flows.
+
+**Two consequences we got wrong earlier.** Our theatrical handshake is **neutral, not protective** — a
+perfect cover handshake is exactly what gets stripped before analysis. And **mux is the strongest evidenced
+defence** (0.85 → 0.13) precisely *because* it stacks inner sessions; a 1:1 mapping is the opposite of that.
+
+### The paper's own words
+
 Xue et al., *Fingerprinting Obfuscated Proxy Traffic with Encapsulated TLS Handshakes*, USENIX Security
 2024 (`2024-xue-fingerprinting`):
 

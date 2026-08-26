@@ -129,6 +129,65 @@ through the wrapped tunnel, where there is no inner TLS handshake to find becaus
   application's first write before dialling. Browsers write immediately, so the cost is negligible — and it
   avoids opening connections that are never used.
 
+## Measured: resumed inner handshakes barely form the burst triple
+
+The paper *conjectures* that "irregular handshakes resulting from optimizations such as TLS Session
+Resumption and False Start may contribute to the majority of false negative instances," but does not measure
+it. We did (`harvest/cmd/burst`, `harvest/testdata/tls13-burst-resumption.log`), using their own burst
+representation.
+
+| Host | full server burst | resumed server burst | resumed / full |
+|---|---|---|---|
+| www.microsoft.com | 9886 B | 1333 B | **13.5%** |
+| www.amazon.com | 6408 B | 1313 B | **20.5%** |
+| www.wikipedia.org | 5576 B | 1317 B | **23.6%** |
+| www.google.com | 5146 B | 1291 B | **25.1%** |
+| www.cloudflare.com | 3885 B | 1291 B | **33.2%** |
+
+Two things stand out beyond the 3–8× shrink:
+
+**The resumed server burst is nearly constant — 1291–1333 B, a spread of 42 bytes** — while the full-handshake
+burst ranges 3885–9886 B, a spread of 6001 B. That is the certificate chain: full handshakes carry one and
+vary with it, resumed handshakes carry none.
+
+**The client burst moves the other way.** Full-handshake client bursts are extremely tight (1488–1492 B);
+resumed ones are larger *and* more variable (1673–1810 B), because the PSK extension's size tracks the
+ticket. So the burst triple differs in **both** dimensions the `Wb=3` window sees:
+
+```
+full     [ +1488,  −5146,  +145 ]
+resumed  [ +1765,  −1291,  +145 ]
+```
+
+**Control:** github.com returned `DidResume=false` — it declined its own ticket and fell back to a full
+handshake — and its "resumed" server burst was **identical to its full one (3087 B both times)**. The
+measurement moves only when resumption actually happens, which is what we want from the instrument.
+
+**What this does not establish:** whether Xue's *trained* classifier fires. We cannot replicate their model
+against their ISP dataset. What we can say is that the feature it keys on differs by 3–8× in one dimension
+and moves in the opposite direction in the other — consistent with their conjecture, and a reason to expect
+resumed inner handshakes to be a weak signal rather than a strong one.
+
+## The routing rule this implies
+
+Exposure depends on whether the **user's inner** session resumes, and the sniffer can already tell — a
+resumption ClientHello carries `pre_shared_key`. So route per connection into whichever mode has the lower
+exposure:
+
+| Inner handshake | Mode | Why |
+|---|---|---|
+| **resumption** (has `pre_shared_key`) | **passthrough** | weak burst triple, and perfect traffic realism after the opening |
+| **full handshake** | **wrapped tunnel + mux** | the strong burst triple — put it where mux drives TPR to 0.13 |
+| not TLS | wrapped tunnel | no inner TLS handshake exists to find |
+
+This is better than either mode alone: each connection lands in the mode where its own structure is least
+legible. It also means **mux stays in the design** rather than being retired by passthrough, which is the
+correction the paper forces.
+
+Indicative but not representative: across our own Chrome captures, resumption was the majority once a
+session was warm (6 of 8, and 8 of 10, in two runs) — but those are repeat connections to a *single* origin,
+so the real browsing ratio needs measuring before it can be leaned on.
+
 ## Residual risk
 
 The honest one: a censor that counts handshakes per TCP connection still sees two where TLS permits one,

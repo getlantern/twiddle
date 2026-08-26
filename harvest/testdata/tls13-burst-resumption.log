@@ -1,0 +1,44 @@
+Xue et al. burst representation: signed payload sizes, consecutive
+same-direction packets aggregated. TLS 1.3 classifier window Wb=3.
+
+=== github.com
+  FULL     seq: +1484 -576 -2511 +64 +77 -158 -3456 
+           bursts: [1484 -3087 141 -3614]
+  RESUMED  seq: +1563 -576 -848 -1663 +64 +77 -158 -2848    (DidResume=false)
+           bursts: [1563 -3087 141 -3006]
+  >> first server burst: full 3087 B  vs  resumed 3087 B   (resumed is 100.0% of full)
+
+=== www.amazon.com
+  FULL     seq: +1488 -576 -1216 -1064 -3552 +64 +81 -179  ...
+           bursts: [1488 -6408 145 -13747]
+  RESUMED  seq: +1673 -576 -737 +64 +81 -179 -1792 -1446    (DidResume=true)
+           bursts: [1673 -1313 145 -3417]
+  >> first server burst: full 6408 B  vs  resumed 1313 B   (resumed is 20.5% of full)
+
+=== www.cloudflare.com
+  FULL     seq: +1492 -576 -1216 -2093 +64 +85 -4864 
+           bursts: [1492 -3885 149 -4864]
+  RESUMED  seq: +1715 -576 -715 +64 +85 -1448 -2042    (DidResume=true)
+           bursts: [1715 -1291 149 -3490]
+  >> first server burst: full 3885 B  vs  resumed 1291 B   (resumed is 33.2% of full)
+
+=== www.google.com
+  FULL     seq: +1488 -576 -1216 -2408 -946 +64 +81 -6144 
+           bursts: [1488 -5146 145 -6144]
+  RESUMED  seq: +1765 -576 -715 +64 +81 -1792 -1438    (DidResume=true)
+           bursts: [1765 -1291 145 -3230]
+  >> first server burst: full 5146 B  vs  resumed 1291 B   (resumed is 25.1% of full)
+
+=== www.microsoft.com
+  FULL     seq: +1491 -576 -1216 -3752 -4342 +80 +84 -606  ...
+           bursts: [1491 -9886 164 -1081]
+  RESUMED  seq: +1810 -576 -757 +80 +84 -303 -1792 -2971    (DidResume=true)
+           bursts: [1810 -1333 164 -5066]
+  >> first server burst: full 9886 B  vs  resumed 1333 B   (resumed is 13.5% of full)
+
+=== www.wikipedia.org
+  FULL     seq: +1491 -576 -1216 -3784 +64 +84 -526 -394 
+           bursts: [1491 -5576 148 -920]
+  RESUMED  seq: +1762 -576 -741 +64 +84 -370    (DidResume=true)
+           bursts: [1762 -1317 148 -370]
+  >> first server burst: full 5576 B  vs  resumed 1317 B   (resumed is 23.6% of full)
