@@ -11,9 +11,9 @@ Every connection is sniffed at the outbound (`sniff.TLSClientHello`, already in 
 
 | Inner traffic | Mode | Rationale |
 |---|---|---|
-| TLS, **resumption** (`pre_shared_key` present) | **passthrough**, 1:1 | measured: resumed burst triple is weak (§ below) |
-| TLS, **full handshake** | **wrapped + mux** | strong burst triple — put it where mux drives TPR 0.85 → 0.13 |
-| **not TLS** | **wrapped + mux** | no inner TLS handshake exists to find |
+| **everything** | **wrapped + mux** | measured: resumptions are only 4.1% of real browsing, so passthrough has almost nothing to carry, while 636 connections per session give mux abundant concurrency |
+
+~~Resumed TLS → passthrough~~ was the plan until the resumption share was measured. See below.
 
 Both modes share the same theatrical opening: a harvested Chrome ClientHello with the authenticator in the
 PSK ticket + binder, a synthesised ServerHello, and a cover SNI chosen per server
@@ -162,21 +162,59 @@ optimum**, not a free architectural choice. Two things follow:
   some resumed connections back into it** — sacrificing their individual realism to keep the mux dense
   enough to protect the full handshakes that have nowhere else to go.
 
-## The number that decides whether this works
+## MEASURED: the resumption share is ~4%, and it changes the design
 
-**What fraction of real browsing connections are resumptions?**
+The gating question was what fraction of real browsing connections are resumptions. Measured with a tapping
+CONNECT proxy (`harvest/cmd/resumeratio`) behind one long-lived Chrome process navigating 16 pages, 6 of
+them deliberate revisits (`harvest/testdata/resumption-ratio-session.log`):
 
-It is not a tuning parameter, it is the gating question, because it sets how much traffic each path carries:
+```
+636 TLS connections   610 full   26 resumed   ->  RESUMPTION SHARE: 4.1%
+254 distinct origins from 16 page loads
+```
 
-| If resumption share is… | Then |
-|---|---|
-| high (say ≥ 70%) | most traffic gets passthrough's structural defence; the wrapped tunnel is a minority path — but see the starvation tension above |
-| low (say ≤ 40%) | the majority of traffic sits on the wrapped path at TPR 0.13–0.18, and *"a censor only needs one flow"* |
+**Not 70%. Four percent.** The per-origin breakdown shows why, and the mechanism is not what we assumed:
 
-Our own captures show resumption in the majority once a session is warm (6/8 and 8/10) — but those are
-repeat connections to a **single origin**, which is the most favourable possible case. Real browsing spreads
-across 5–20 origins per page, each needing a first full handshake. **This number must be measured against
-real browsing before the design can be called sound.**
+```
+static01.nytimes.com              17 full /  0 resumed
+securepubads.g.doubleclick.net    16 / 0
+static01.nyt.com                  15 / 0
+www.google.com                    13 / 2
+tpsc-uw1.doubleverify.com         11 / 4
+```
+
+Seventeen connections to a single origin with **zero** resumption. Browsers open connections to an origin in
+a **parallel burst** at page load, so every connection in the burst starts before any session ticket has
+arrived and none of them can resume. Resumption only happens on a *sequential* later visit — which is why the
+handful of origins that do resume are the ones contacted across multiple page loads.
+
+Our earlier 75–80% figures came from sequential fetches to a single origin. That is the most favourable case
+imaginable, and real browsing is close to its opposite: a long tail of 254 origins, most contacted once.
+
+### What this does to the routing rule
+
+Passthrough was justified by carrying most of the traffic. It would carry **4%**. Routing *all* TLS through
+it instead is worse, not better: full inner handshakes produce exactly the clean burst triple, at Xue's
+non-mux TPR of 0.74–0.88.
+
+Meanwhile the wrapped path gets the opposite news. 636 connections over one browsing session is abundant
+concurrency — far more than the concurrency-8 configuration where Xue measured TPR **0.13–0.18**. The
+starvation tension identified above resolves itself: there is nothing to starve mux of.
+
+> **Revised: the wrapped + mux tunnel is the primary path. Passthrough is a marginal optimisation and should
+> be cut from v1.**
+
+That is a real simplification — no dual-mode routing, no mode byte, no second code path — bought by a
+measurement that took an afternoon.
+
+### Caveats on the number
+
+- Headless Chrome against ad-heavy Western sites. Much of the 254-origin tail is ad and analytics traffic.
+- **Ad blocking would change this materially.** A user blocking that tail contacts far fewer origins, each
+  more likely to be revisited, which should raise the resumption share. Lantern users plausibly skew that
+  way, and it is worth re-measuring with a blocker enabled before treating 4% as universal.
+- Long-lived non-browser apps (messaging, sync) hold connections rather than reopening them, so they neither
+  resume nor produce repeated handshakes.
 
 ## Still open
 

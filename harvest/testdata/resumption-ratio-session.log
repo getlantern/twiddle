@@ -1,0 +1,22 @@
+CONNECT proxy on 127.0.0.1:18510 — point Chrome at it
+
+=== TLS connections: 636  (full 610, resumed 26)   non-TLS tunnels: 0
+=== RESUMPTION SHARE: 4.1%
+--- top origins (full/resumed) ---
+  static01.nytimes.com                       17 /  0
+  securepubads.g.doubleclick.net             16 /  0
+  static01.nyt.com                           15 /  0
+  www.google.com                             13 /  2
+  tpsc-uw1.doubleverify.com                  11 /  4
+  static.files.bbci.co.uk                    13 /  0
+  pixel.rubiconproject.com                   10 /  2
+  content-autofill.googleapis.com            11 /  0
+  pagead2.googlesyndication.com              10 /  0
+  play.google.com                             8 /  0
+  static.captcha-delivery.com                 8 /  0
+  web-banner.ads.aps.amazon-adsystem.com      7 /  0
+  token.rubiconproject.com                    5 /  2
+  assets.targetimg1.com                       7 /  0
+  tpc.googlesyndication.com                   7 /  0
+    ... and 239 more origins
+--- distinct origins contacted: 254
