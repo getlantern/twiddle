@@ -168,7 +168,7 @@ func TestOpeningLooksLikeTLS(t *testing.T) {
 	t.Logf("first bytes on the wire: % x ... (%d-byte ClientHello)", first[:5], n)
 }
 
-func TestSynthesizedServerHelloShape(t *testing.T) {
+func TestSynthesizedServerHelloMatchesMeasuredLength(t *testing.T) {
 	k := ticketKey(t)
 	cred, _ := k.Issue(1, DefaultTicketLen)
 	wire, _, err := Twiddle(pool(t)[0], Options{Credential: cred, BinderLen: 32})
@@ -178,29 +178,89 @@ func TestSynthesizedServerHelloShape(t *testing.T) {
 	h, _ := ParseClientHello(wire)
 	eph, _ := h.KeyShare()
 
-	sh, err := SynthesizeServerHello(ServerHelloParams{
-		SessionIDEcho: h.SessionID, ServerEphemeral: eph,
-	})
-	if err != nil {
-		t.Fatal(err)
+	for _, pskFirst := range []bool{false, true} {
+		sh, err := SynthesizeServerHello(ServerHelloParams{
+			SessionIDEcho: h.SessionID, ServerEphemeral: eph, PSKFirst: pskFirst,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Every one of five real servers produced exactly this for a resumed
+		// handshake; it is a point target, not a range.
+		if len(sh) != ServerHelloResumedLen {
+			t.Errorf("PSKFirst=%v: ServerHello is %d bytes, measured %d",
+				pskFirst, len(sh), ServerHelloResumedLen)
+		}
+		if sh[0] != 0x16 || sh[5] != 0x02 {
+			t.Errorf("not a ServerHello record: % x", sh[:6])
+		}
+		if !bytes.Equal(sh[9+2+32+1:9+2+32+1+len(h.SessionID)], h.SessionID) {
+			t.Error("ServerHello does not echo legacy_session_id")
+		}
+		back, err := ServerEphemeralFromShare(sh)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(back.Bytes(), eph.Bytes()) {
+			t.Error("server ephemeral does not survive the hybrid share")
+		}
 	}
-	// measured: real servers return a 1210-byte ServerHello record
-	if len(sh) < 1150 || len(sh) > 1280 {
-		t.Errorf("ServerHello is %d bytes; real servers measured 1210", len(sh))
+	t.Logf("synthesised ServerHello is exactly %d B in both extension orders", ServerHelloResumedLen)
+}
+
+// TestEmittedHelloMatchesHarvestedLength: with the ticket length chosen to match
+// the one the harvested hello already carried, our emission must be the same
+// size as what the browser produced -- differing only by the ECH GREASE bucket,
+// which Chrome itself varies per connection.
+func TestEmittedHelloMatchesHarvestedLength(t *testing.T) {
+	k := ticketKey(t)
+	checked := 0
+	for name, rec := range realHellos(t) {
+		h, err := ParseClientHello(rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := h.Find(ExtPreSharedKey)
+		if e == nil {
+			continue // only resumption hellos carry a ticket to match
+		}
+		origTicket, _, origBinder, err := parsePSK(e.Data)
+		if err != nil {
+			continue
+		}
+		cred, err := k.Issue(1, len(origTicket))
+		if err != nil {
+			continue // ticket shorter than our minimum; nothing to compare
+		}
+		wire, _, err := Twiddle(rec, Options{
+			CoverSNI:   h.SNI(), // same SNI, so no length change from that
+			Credential: cred,
+			BinderLen:  len(origBinder),
+		})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		delta := len(wire) - len(rec)
+		// ECH GREASE moves in 32-byte buckets across a 96-byte span.
+		if delta%32 != 0 || delta < -96 || delta > 96 {
+			t.Errorf("%s: emitted %d B vs harvested %d B (delta %+d) -- not explained by the ECH bucket",
+				name, len(wire), len(rec), delta)
+		}
+		checked++
 	}
-	if sh[0] != 0x16 || sh[5] != 0x02 {
-		t.Errorf("not a ServerHello record: % x", sh[:6])
+	if checked == 0 {
+		t.Skip("no resumption hellos with a long enough ticket in the corpus")
 	}
-	// TLS 1.3 requires the session_id echo
-	if !bytes.Equal(sh[9+2+32+1:9+2+32+1+len(h.SessionID)], h.SessionID) {
-		t.Error("ServerHello does not echo legacy_session_id")
+	t.Logf("length parity holds for %d harvested resumption hellos (ECH bucket only)", checked)
+}
+
+func TestTicketLenForCover(t *testing.T) {
+	for host, want := range map[string]int{
+		"www.cloudflare.com": 176, "www.google.com": 230,
+		"www.microsoft.com": 256, "unknown.example": DefaultTicketLen,
+	} {
+		if got := TicketLenForCover(host); got != want {
+			t.Errorf("%s: got %d, want %d", host, got, want)
+		}
 	}
-	back, err := ServerEphemeralFromShare(sh)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(back.Bytes(), eph.Bytes()) {
-		t.Error("server ephemeral does not survive the hybrid share")
-	}
-	t.Logf("synthesised ServerHello: %d bytes (real servers: 1210)", len(sh))
 }

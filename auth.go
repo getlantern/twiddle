@@ -42,9 +42,19 @@ const (
 	ticketFixed    = 8 + 32 + 8 // client_id ‖ psk ‖ issued_at
 	MinTicketLen   = ticketNonceLen + ticketTagLen + ticketFixed
 
-	// DefaultTicketLen matches the middle of the range measured from real
-	// servers (32, 105, 176, 230, 256 bytes). It must be stable per identity: a
-	// server's ticket format does not vary connection to connection.
+	// DefaultTicketLen is a fallback only. Ticket length is a FIDELITY parameter,
+	// not a free choice: it directly sets the emitted ClientHello size, because
+	// the ticket travels inside pre_shared_key. Measured, with the resulting
+	// resumption hello from the same client:
+	//
+	//	cloudflare  176 B ticket -> 1711 B hello
+	//	google      230 B ticket -> 1761 B hello
+	//	microsoft   256 B ticket -> 1806 B hello
+	//
+	// So an egress claiming to be microsoft.com should issue 256-byte tickets.
+	// harvest/cmd/resume measures the right value for any host. It must also be
+	// stable per identity: a real server's ticket format does not vary
+	// connection to connection.
 	DefaultTicketLen = 176
 
 	GroupX25519 uint16 = 0x001d
@@ -330,4 +340,24 @@ func parsePSK(d []byte) (ticket []byte, age [4]byte, binder []byte, err error) {
 		return nil, age, nil, errMalformed
 	}
 	return ticket, age, d[p+1 : p+1+bl], nil
+}
+
+// TicketLenForCover returns the ticket length measured from a known cover
+// identity's real server, so the emitted ClientHello matches what a browser
+// talking to that host would produce. Falls back to DefaultTicketLen.
+//
+// Measured by harvest/cmd/resume; extend this table as covers are added.
+func TicketLenForCover(host string) int {
+	switch host {
+	case "www.cloudflare.com":
+		return 176
+	case "www.google.com":
+		return 230
+	case "www.microsoft.com":
+		return 256
+	case "github.com":
+		return 32
+	default:
+		return DefaultTicketLen
+	}
 }

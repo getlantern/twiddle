@@ -1,0 +1,92 @@
+
+=== www.google.com
+  RECORD total 1215  (header 5 + handshake 1210)
+    legacy_version   2   0x0303
+    random          32
+    session_id      33   (1 len + 32 echo)
+    cipher_suite     2   0x1301
+    compression      1
+    extensions_len   2   (block 1134)
+      key_share            ext 1128  (4 hdr + 1124 data)   group 0x11ec, key 1120 B
+      supported_versions   ext    6  (4 hdr + 2 data)
+
+=== www.cloudflare.com
+  RECORD total 1215  (header 5 + handshake 1210)
+    legacy_version   2   0x0303
+    random          32
+    session_id      33   (1 len + 32 echo)
+    cipher_suite     2   0x1301
+    compression      1
+    extensions_len   2   (block 1134)
+      key_share            ext 1128  (4 hdr + 1124 data)   group 0x11ec, key 1120 B
+      supported_versions   ext    6  (4 hdr + 2 data)
+
+=== www.microsoft.com
+  RECORD total 1215  (header 5 + handshake 1210)
+    legacy_version   2   0x0303
+    random          32
+    session_id      33   (1 len + 32 echo)
+    cipher_suite     2   0x1302
+    compression      1
+    extensions_len   2   (block 1134)
+      supported_versions   ext    6  (4 hdr + 2 data)
+      key_share            ext 1128  (4 hdr + 1124 data)   group 0x11ec, key 1120 B
+
+=== www.amazon.com
+  RECORD total 1215  (header 5 + handshake 1210)
+    legacy_version   2   0x0303
+    random          32
+    session_id      33   (1 len + 32 echo)
+    cipher_suite     2   0x1301
+    compression      1
+    extensions_len   2   (block 1134)
+      supported_versions   ext    6  (4 hdr + 2 data)
+      key_share            ext 1128  (4 hdr + 1124 data)   group 0x11ec, key 1120 B
+
+=== www.cloudflare.com
+  --- FULL handshake ---
+  RECORD total 1215  (header 5 + handshake 1210)
+    legacy_version   2   0x0303
+    random          32
+    session_id      33   (1 len + 32 echo)
+    cipher_suite     2   0x1301
+    compression      1
+    extensions_len   2   (block 1134)
+      key_share            ext 1128  (4 hdr + 1124 data)   group 0x11ec, key 1120 B
+      supported_versions   ext    6  (4 hdr + 2 data)
+    -> DidResume=false
+  --- RESUMED handshake ---
+  RECORD total 1215  (header 5 + handshake 1210)
+    legacy_version   2   0x0303
+    random          32
+    session_id      33   (1 len + 32 echo)
+    cipher_suite     2   0x1301
+    compression      1
+    extensions_len   2   (block 1134)
+      key_share            ext 1128  (4 hdr + 1124 data)   group 0x11ec, key 1120 B
+      supported_versions   ext    6  (4 hdr + 2 data)
+    -> DidResume=false
+
+=== www.google.com
+  --- FULL handshake ---
+  RECORD total 1215  (header 5 + handshake 1210)
+    legacy_version   2   0x0303
+    random          32
+    session_id      33   (1 len + 32 echo)
+    cipher_suite     2   0x1301
+    compression      1
+    extensions_len   2   (block 1134)
+      key_share            ext 1128  (4 hdr + 1124 data)   group 0x11ec, key 1120 B
+      supported_versions   ext    6  (4 hdr + 2 data)
+    -> DidResume=false
+  --- RESUMED handshake ---
+  RECORD total 1215  (header 5 + handshake 1210)
+    legacy_version   2   0x0303
+    random          32
+    session_id      33   (1 len + 32 echo)
+    cipher_suite     2   0x1301
+    compression      1
+    extensions_len   2   (block 1134)
+      key_share            ext 1128  (4 hdr + 1124 data)   group 0x11ec, key 1120 B
+      supported_versions   ext    6  (4 hdr + 2 data)
+    -> DidResume=false

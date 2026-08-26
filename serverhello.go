@@ -9,12 +9,22 @@ import (
 
 // Synthesising the server's opening.
 //
-// Measured against www.google.com, www.cloudflare.com and www.microsoft.com,
-// the ServerHello record is 1210 bytes on all three -- a number set almost
-// entirely by the X25519MLKEM768 key share, whose server-side value is a
-// 1088-byte ML-KEM ciphertext followed by a 32-byte X25519 key. Every captured
-// Chrome hello offers that group, and every modern server selects it, so
-// selecting anything else would itself be the anomaly.
+// Measured against five real servers (harvest/testdata/serverhello-resumption-delta.log),
+// every one produced the identical layout:
+//
+//	full handshake     1215 B   key_share(1128) + supported_versions(6)
+//	resumed handshake  1221 B   ... + pre_shared_key(6)
+//
+// The size is set almost entirely by the X25519MLKEM768 key share, whose
+// server-side value is a 1088-byte ML-KEM ciphertext followed by a 32-byte
+// X25519 key. Every captured Chrome hello offers that group and every server
+// measured selects it, so selecting anything else would itself be the anomaly.
+//
+// Our opening is always a resumption, so 1221 is the target -- and extension
+// ORDER varies by server while staying fixed per server: google and cloudflare
+// place pre_shared_key first, microsoft, amazon and wikipedia place it last.
+// Since one egress impersonates one identity, a stable per-identity order is the
+// faithful behaviour, and PSKFirst selects it.
 //
 // Under theater the ML-KEM half never has to be real: it is opaque bytes to any
 // observer, and both ends of the connection are ours. What must be right is what
@@ -43,7 +53,14 @@ type ServerHelloParams struct {
 	ServerEphemeral *ecdh.PublicKey
 	// SelectedIdentity is the PSK the server accepted; 0 for the only one we offer.
 	SelectedIdentity uint16
+	// PSKFirst places pre_shared_key before the other extensions, as google and
+	// cloudflare do. Should be stable for a given cover identity.
+	PSKFirst bool
 }
+
+// ServerHelloResumedLen is what every measured server produced for a resumed
+// handshake. Synthesised output is asserted against it.
+const ServerHelloResumedLen = 1221
 
 // SynthesizeServerHello builds the ServerHello handshake record.
 func SynthesizeServerHello(p ServerHelloParams) ([]byte, error) {
@@ -66,20 +83,27 @@ func SynthesizeServerHello(p ServerHelloParams) ([]byte, error) {
 	}
 	copy(share[mlkem768CiphertextLen:], p.ServerEphemeral.Bytes())
 
+	var psk []byte
+	psk = appendU16(psk, ExtPreSharedKey)
+	psk = appendU16(psk, 2)
+	psk = appendU16(psk, p.SelectedIdentity)
+
+	var rest []byte
+	rest = appendU16(rest, 0x002b) // supported_versions
+	rest = appendU16(rest, 2)
+	rest = appendU16(rest, 0x0304) // TLS 1.3
+	rest = appendU16(rest, ExtKeyShare)
+	rest = appendU16(rest, uint16(4+len(share)))
+	rest = appendU16(rest, GroupX25519MLKEM768)
+	rest = appendU16(rest, uint16(len(share)))
+	rest = append(rest, share...)
+
 	var ext []byte
-	ext = appendU16(ext, 0x002b) // supported_versions
-	ext = appendU16(ext, 2)
-	ext = appendU16(ext, 0x0304) // TLS 1.3
-
-	ext = appendU16(ext, ExtKeyShare)
-	ext = appendU16(ext, uint16(4+len(share)))
-	ext = appendU16(ext, GroupX25519MLKEM768)
-	ext = appendU16(ext, uint16(len(share)))
-	ext = append(ext, share...)
-
-	ext = appendU16(ext, ExtPreSharedKey)
-	ext = appendU16(ext, 2)
-	ext = appendU16(ext, p.SelectedIdentity)
+	if p.PSKFirst {
+		ext = append(append(ext, psk...), rest...)
+	} else {
+		ext = append(append(ext, rest...), psk...)
+	}
 
 	var body []byte
 	body = appendU16(body, 0x0303) // legacy_version

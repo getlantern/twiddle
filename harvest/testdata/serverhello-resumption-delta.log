@@ -1,0 +1,25 @@
+
+=== www.google.com
+  full     ServerHello 1215 B   pre_shared_key=false  exts: [key_share(1128) supported_versions(6)]
+  resumed  ServerHello 1221 B   pre_shared_key=true   exts: [pre_shared_key(6) key_share(1128) supported_versions(6)]
+  >> delta full -> resumed: +6 bytes
+
+=== www.cloudflare.com
+  full     ServerHello 1215 B   pre_shared_key=false  exts: [key_share(1128) supported_versions(6)]
+  resumed  ServerHello 1221 B   pre_shared_key=true   exts: [pre_shared_key(6) key_share(1128) supported_versions(6)]
+  >> delta full -> resumed: +6 bytes
+
+=== www.microsoft.com
+  full     ServerHello 1215 B   pre_shared_key=false  exts: [supported_versions(6) key_share(1128)]
+  resumed  ServerHello 1221 B   pre_shared_key=true   exts: [supported_versions(6) key_share(1128) pre_shared_key(6)]
+  >> delta full -> resumed: +6 bytes
+
+=== www.amazon.com
+  full     ServerHello 1215 B   pre_shared_key=false  exts: [supported_versions(6) key_share(1128)]
+  resumed  ServerHello 1221 B   pre_shared_key=true   exts: [supported_versions(6) key_share(1128) pre_shared_key(6)]
+  >> delta full -> resumed: +6 bytes
+
+=== www.wikipedia.org
+  full     ServerHello 1215 B   pre_shared_key=false  exts: [supported_versions(6) key_share(1128)]
+  resumed  ServerHello 1221 B   pre_shared_key=true   exts: [supported_versions(6) key_share(1128) pre_shared_key(6)]
+  >> delta full -> resumed: +6 bytes
