@@ -1,4 +1,4 @@
-# `ordinary`: the design, consolidated
+# `twiddle`: the design, consolidated
 
 Where the iterations landed. Supersedes the scattered conclusions in
 [framing.md](framing.md), [passthrough.md](passthrough.md) and

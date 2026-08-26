@@ -1,4 +1,4 @@
-module github.com/getlantern/ordinary
+module github.com/getlantern/twiddle
 
 go 1.26.2
 

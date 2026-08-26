@@ -1,4 +1,4 @@
-# Traffic analysis: where `ordinary` is strong, and where it is not
+# Traffic analysis: where `twiddle` is strong, and where it is not
 
 The theater design ([framing.md](framing.md), and the design docs in `discovery-engine`) makes the
 **opening** indistinguishable. This document is about everything after it, because that is a separate
@@ -50,7 +50,7 @@ Xue et al., *Fingerprinting Obfuscated Proxy Traffic with Encapsulated TLS Hands
 Deployed in a mid-size ISP serving over a million users, with minimal collateral damage. Two consequences
 we have to accept plainly:
 
-1. **`ordinary` inherits this.** Our theater perfects the outer handshake; this attack reads the *shape of
+1. **`twiddle` inherits this.** Our theater perfects the outer handshake; this attack reads the *shape of
    what comes after*. The paper names REALITY-style approaches explicitly: making the outer handshake
    indistinguishable from a real TLS server "still expose[s] inner-handshake structure once the censor can
    observe full-stream patterns."
@@ -68,7 +68,7 @@ packets, truncated to 320 bytes each** — 1600 bytes total — at macro-F1 ≥ 
 > Designs that delay the circumvention-specific handshake beyond the opening burst (e.g., by completing a
 > full TLS-mimicry exchange before tunneling) gain meaningful protection against burst-level classifiers.
 
-That is precisely what `ordinary` does. Our first 1600 bytes are a genuine harvested ClientHello. The two
+That is precisely what `twiddle` does. Our first 1600 bytes are a genuine harvested ClientHello. The two
 defences are complementary, not redundant: **theater owns the opening, shaping must own the steady state.**
 
 ## The countermeasure that matters most, and it is not padding

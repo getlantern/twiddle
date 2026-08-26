@@ -1,7 +1,7 @@
 # Cover domains
 
 Every server picks a domain it masquerades as. The choice should be **as random as possible**, per server,
-drawn from the unblocked long tail — for the same reason the transport is called `ordinary`.
+drawn from the unblocked long tail — for the same reason the rest of the transport blends rather than hides.
 
 ## Why per-server, and why random
 

@@ -1,13 +1,15 @@
-# ordinary
+# twiddle
 
 A TLS-shaped transport whose opening bytes are a **genuine ClientHello harvested from a real browser**,
 whose ServerHello is synthesised, and whose payload is an ordinary AEAD tunnel framed as TLS
 `application_data` (`0x17`) records.
 
-The name is the thesis. The security property is not concealment — it is being indistinguishable from the
-most common thing on the wire, so that blocking it costs the censor everything else. A gray sedan on a
-motorway is not hidden; it is simply not worth pulling over, and pulling it over means pulling over ten
-thousand identical cars.
+The name describes the method: we take genuine browser bytes and **twiddle** a handful of fields — the SNI,
+the authenticator, the extension order — leaving everything else exactly as the browser produced it.
+
+The security property is not concealment. It is being indistinguishable from the most common thing on the
+wire, so that blocking it costs the censor everything else. A gray sedan on a motorway is not hidden; it is
+simply not worth pulling over, and pulling it over means pulling over ten thousand identical cars.
 
 ## Why this works
 
@@ -66,6 +68,6 @@ Run the tools from `harvest/` — paths default to `testdata/`.
 established the design is here.
 
 This repo is **private** during Phases 0–1 and flips to **public before Phase 2**, when
-`lantern-box/protocol/ordinary` begins importing it (a public module importing a private one forces
+`lantern-box/protocol/twiddle` begins importing it (a public module importing a private one forces
 credentials into every build). The full design, measurements and rollout plan live in
 `getlantern/discovery-engine`.

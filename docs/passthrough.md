@@ -120,7 +120,7 @@ through the wrapped tunnel, where there is no inner TLS handshake to find becaus
 
 ## What it costs
 
-- **Only covers TLS-bearing traffic.** Everything else uses the wrapped tunnel, so `ordinary` carries both
+- **Only covers TLS-bearing traffic.** Everything else uses the wrapped tunnel, so `twiddle` carries both
   modes and selects per connection.
 - **The proxy must read the SNI to route**, as any proxy must.
 - **No shaping is possible** once passthrough begins. That is the point, but it means a flaw in the opening
