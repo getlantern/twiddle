@@ -1,6 +1,13 @@
-// Dial a real TLS 1.3 server, send a Chrome ClientHello, and log the raw record
-// sequence the server returns. Verifies that everything after ServerHello is
-// opaque 0x17, and measures the certificate-flight profile we must imitate.
+// flight measures the record profile a real TLS 1.3 server returns: the
+// ServerHello, the ChangeCipherSpec, and the encrypted flight that follows.
+//
+// It emits a hello from twiddle's own pool rather than using a TLS library to
+// build one. That is deliberate on two counts: it removes any dependency whose
+// output might differ from what we actually ship, and it exercises the emitter
+// the transport uses, so a fidelity bug shows up here rather than in the field.
+//
+// The handshake is never completed. Everything we want arrives before any
+// Finished, so a key_share the server cannot agree with costs nothing.
 package main
 
 import (
@@ -11,55 +18,82 @@ import (
 	"os"
 	"time"
 
-	tls "github.com/metacubex/utls"
+	"github.com/getlantern/twiddle"
 )
 
-func name(t byte) string {
+func recordName(t byte) string {
 	switch t {
-	case 0x14: return "ChangeCipherSpec"
-	case 0x15: return "Alert"
-	case 0x16: return "Handshake"
-	case 0x17: return "ApplicationData"
+	case 0x16:
+		return "Handshake"
+	case 0x14:
+		return "ChangeCipherSpec"
+	case 0x17:
+		return "ApplicationData"
+	case 0x15:
+		return "Alert"
 	}
 	return fmt.Sprintf("0x%02x", t)
 }
 
-func probe(host string) {
-	c, err := net.DialTimeout("tcp", host+":443", 6*time.Second)
-	if err != nil { fmt.Println("  dial:", err); return }
-	defer c.Close()
-
-	u := tls.UClient(c, &tls.Config{ServerName: host, InsecureSkipVerify: true}, tls.HelloChrome_Auto)
-	if err := u.BuildHandshakeState(); err != nil { fmt.Println("  build:", err); return }
-	hello := u.HandshakeState.Hello.Raw
-	rec := append([]byte{0x16, 0x03, 0x01, byte(len(hello) >> 8), byte(len(hello))}, hello...)
-	if _, err := c.Write(rec); err != nil { fmt.Println("  write:", err); return }
-	fmt.Printf("  -> ClientHello %d bytes\n", len(rec))
-
-	c.SetReadDeadline(time.Now().Add(4 * time.Second))
-	var n, appBytes, appRecs int
-	t0 := time.Now()
-	for {
-		h := make([]byte, 5)
-		if _, err := io.ReadFull(c, h); err != nil { break }
-		l := int(binary.BigEndian.Uint16(h[3:5]))
-		b := make([]byte, l)
-		if _, err := io.ReadFull(c, b); err != nil { break }
-		n++
-		dt := time.Since(t0)
-		if h[0] == 0x17 { appRecs++; appBytes += l }
-		fmt.Printf("  <- #%-2d %-16s len=%5d  t=+%dms\n", n, name(h[0]), l, dt.Milliseconds())
-		if n >= 12 { break }
+func run(host string, pool [][]byte) {
+	h, err := twiddle.ParseClientHello(pool[0])
+	if err != nil {
+		fmt.Println("  pool:", err)
+		return
 	}
-	fmt.Printf("  == %d records; the encrypted flight was %d ApplicationData records totalling %d bytes\n",
-		n, appRecs, appBytes)
+	if err := h.SetSNI(host); err != nil {
+		fmt.Println("  sni:", err)
+		return
+	}
+	if err := h.Rerandomize(); err != nil {
+		fmt.Println("  rerandomize:", err)
+		return
+	}
+	if err := h.Shuffle(); err != nil {
+		fmt.Println("  shuffle:", err)
+		return
+	}
+	wire := h.Marshal()
+
+	c, err := net.DialTimeout("tcp", host+":443", 8*time.Second)
+	if err != nil {
+		fmt.Println("  dial:", err)
+		return
+	}
+	defer c.Close()
+	start := time.Now()
+	if _, err := c.Write(wire); err != nil {
+		fmt.Println("  write:", err)
+		return
+	}
+	fmt.Printf("  -> ClientHello %d bytes\n", len(wire))
+
+	c.SetReadDeadline(time.Now().Add(10 * time.Second))
+	for i := 1; ; i++ {
+		var hdr [5]byte
+		if _, err := io.ReadFull(c, hdr[:]); err != nil {
+			return
+		}
+		n := int(binary.BigEndian.Uint16(hdr[3:5]))
+		if _, err := io.ReadFull(c, make([]byte, n)); err != nil {
+			return
+		}
+		fmt.Printf("  <- #%-2d %-16s len=%5d  t=+%dms\n", i, recordName(hdr[0]), n,
+			time.Since(start).Milliseconds())
+		if i >= 8 {
+			return
+		}
+	}
 }
 
 func main() {
 	hosts := os.Args[1:]
-	if len(hosts) == 0 { hosts = []string{"www.google.com", "www.cloudflare.com", "www.microsoft.com"} }
+	if len(hosts) == 0 {
+		hosts = []string{"www.google.com", "www.cloudflare.com", "www.microsoft.com"}
+	}
+	pool := twiddle.DefaultPool()
 	for _, h := range hosts {
 		fmt.Printf("\n=== %s\n", h)
-		probe(h)
+		run(h, pool)
 	}
 }

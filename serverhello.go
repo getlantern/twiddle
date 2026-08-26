@@ -36,7 +36,9 @@ const (
 	GroupX25519MLKEM768 uint16 = 0x11ec
 
 	mlkem768CiphertextLen = 1088
-	hybridServerShareLen  = mlkem768CiphertextLen + 32
+	// mlkem768EncapKeyLen is the client-side half of an X25519MLKEM768 share.
+	mlkem768EncapKeyLen  = 1184
+	hybridServerShareLen = mlkem768CiphertextLen + 32
 
 	TLS_AES_128_GCM_SHA256 uint16 = 0x1301
 	TLS_AES_256_GCM_SHA384 uint16 = 0x1302

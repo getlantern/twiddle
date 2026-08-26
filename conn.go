@@ -3,18 +3,16 @@ package twiddle
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hkdf"
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"net"
 	"sync"
 	"time"
-
-	"golang.org/x/crypto/hkdf"
 )
 
 // The record layer mirrors TLS 1.3's own construction rather than inventing
@@ -35,9 +33,9 @@ const (
 	// adds the content-type byte on top, so inner tops out at maxPlaintext+1 and
 	// the wire record at maxPlaintext+1+16 = 16401 -- which is exactly the
 	// max-size mode observed in real traffic.
-	maxPlaintext  = 1 << 14
-	maxInner      = maxPlaintext + 1
-	maxCiphertext = maxPlaintext + 256
+	maxPlaintext     = 1 << 14
+	maxInner         = maxPlaintext + 1
+	maxCiphertext    = maxPlaintext + 256
 	contentAppData   = 0x17
 	contentAlert     = 0x15
 	contentHandshake = 0x16
@@ -59,13 +57,12 @@ type Session struct {
 // secret. Authentication comes from the psk and forward secrecy from the DH --
 // the same division of labour as TLS 1.3 psk_dhe_ke.
 func DeriveSession(psk, shared []byte, suite uint16) (*Session, error) {
-	var newHash func() hash.Hash
 	var keyLen int
 	switch suite {
 	case TLS_AES_128_GCM_SHA256:
-		newHash, keyLen = sha256.New, 16
+		keyLen = 16
 	case TLS_AES_256_GCM_SHA384:
-		newHash, keyLen = sha512.New384, 32
+		keyLen = 32
 	default:
 		return nil, fmt.Errorf("twiddle: unsupported cipher suite %#04x", suite)
 	}
@@ -77,14 +74,21 @@ func DeriveSession(psk, shared []byte, suite uint16) (*Session, error) {
 		{"twiddle c ap traffic", &s.Client},
 		{"twiddle s ap traffic", &s.Server},
 	} {
-		d.out.Key = make([]byte, keyLen)
-		r := hkdf.New(newHash, shared, psk, []byte(d.label))
-		if _, err := io.ReadFull(r, d.out.Key); err != nil {
+		// psk is the salt and the ECDH secret the input keying material, so both
+		// must be present to derive traffic keys: authentication from the
+		// pre-shared key, forward secrecy from the Diffie-Hellman.
+		var out []byte
+		var err error
+		if suite == TLS_AES_256_GCM_SHA384 {
+			out, err = hkdf.Key(sha512.New384, shared, psk, d.label, keyLen+12)
+		} else {
+			out, err = hkdf.Key(sha256.New, shared, psk, d.label, keyLen+12)
+		}
+		if err != nil {
 			return nil, err
 		}
-		if _, err := io.ReadFull(r, d.out.IV[:]); err != nil {
-			return nil, err
-		}
+		d.out.Key = out[:keyLen]
+		copy(d.out.IV[:], out[keyLen:])
 	}
 	return s, nil
 }

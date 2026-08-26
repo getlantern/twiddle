@@ -2,6 +2,7 @@ package twiddle
 
 import (
 	"crypto/ecdh"
+	"crypto/mlkem"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -96,10 +97,18 @@ func (h *ClientHello) Rerandomize() error {
 	return nil
 }
 
-// rerandKeyShare replaces each offered public key with fresh random bytes,
-// preserving the group ids and key lengths. Under the theater model no real
-// key agreement runs over these, so any bytes of the right length will do --
-// and every group in use encodes as uniform-looking bytes.
+// rerandKeyShare replaces each offered public key with a fresh, VALID one.
+//
+// An earlier version filled these with random bytes, reasoning that under the
+// theater model no real key agreement runs over them. That was wrong, and
+// measurably so: real servers rejected the resulting hello with
+// illegal_parameter or decode_error, because random bytes are not a valid
+// ML-KEM-768 encapsulation key.
+//
+// The consequence is not a broken tool but a live distinguisher. A censor can
+// capture one of our hellos and replay it to the SNI we claim -- a genuine
+// Chrome hello draws a ServerHello, ours would draw an alert. Every key share
+// we emit must be something a real server accepts.
 func rerandKeyShare(e *Extension) error {
 	d := e.Data
 	if len(d) < 2 {
@@ -107,16 +116,51 @@ func rerandKeyShare(e *Extension) error {
 	}
 	p := 2
 	for p+4 <= len(d) {
+		group := binary.BigEndian.Uint16(d[p : p+2])
 		n := int(binary.BigEndian.Uint16(d[p+2 : p+4]))
 		if p+4+n > len(d) {
 			return errMalformed
 		}
-		if _, err := rand.Read(d[p+4 : p+4+n]); err != nil {
+		if err := freshKeyShare(group, d[p+4:p+4+n]); err != nil {
 			return err
 		}
 		p += 4 + n
 	}
 	return nil
+}
+
+// freshKeyShare fills one KeyShareEntry in place with a valid public value for
+// its group. Unknown groups -- GREASE placeholders carry a single byte -- keep
+// random contents, which is what Chrome sends for them.
+func freshKeyShare(group uint16, out []byte) error {
+	switch {
+	case group == GroupX25519 && len(out) == 32:
+		k, err := ecdh.X25519().GenerateKey(rand.Reader)
+		if err != nil {
+			return err
+		}
+		copy(out, k.PublicKey().Bytes())
+		return nil
+
+	case group == GroupX25519MLKEM768 && len(out) == mlkem768EncapKeyLen+32:
+		// X25519MLKEM768 concatenates the ML-KEM encapsulation key with the
+		// X25519 public key. Both halves must be genuine or the server rejects.
+		dk, err := mlkem.GenerateKey768()
+		if err != nil {
+			return err
+		}
+		copy(out[:mlkem768EncapKeyLen], dk.EncapsulationKey().Bytes())
+		k, err := ecdh.X25519().GenerateKey(rand.Reader)
+		if err != nil {
+			return err
+		}
+		copy(out[mlkem768EncapKeyLen:], k.PublicKey().Bytes())
+		return nil
+
+	default:
+		_, err := rand.Read(out)
+		return err
+	}
 }
 
 // rerandECHGrease rebuilds a GREASE ECH extension: fresh config_id, fresh 32-byte
