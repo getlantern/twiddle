@@ -90,16 +90,55 @@ What the theater buys is a *different* axis: Kulatilleke 2026 classify from the 
 what we do. **Theater owns the opening; routing and mux own the steady state.** They are complementary, and
 neither substitutes for the other.
 
-## One untested idea worth testing
+## Burst interleaving: tested, works, but do not lean on it
 
 Xue's claim that padding cannot help rests on padding being unable to *shrink* a burst. But a burst is a run
 of consecutive same-direction packets, so **interleaving a small client-direction record into the server's
-flight splits one large burst into two smaller ones** — which attacks the representation directly rather than
-adding bytes to it.
+flight splits one large burst into two** — attacking the representation rather than adding bytes to it. Real
+h2 clients already do this via `WINDOW_UPDATE` during downloads.
 
-Real h2 connections already do this: clients send `WINDOW_UPDATE` frames during large downloads. So the
-technique is plausible traffic, not just evasion. Untested, and Xue note censors can adapt by "leveraging
-packet directions over sizes" — but it is cheap to try on the wrapped path.
+We built an approximation of their Algorithm 2 (`harvest/burst_analysis.py`) — train on the first `Wb=3`
+bursts of each flow, then slide a 3-burst window over a test sample and take the **minimum** distance — over
+a corpus of 30 real servers (`harvest/testdata/burst-corpus.jsonl`).
+
+At a threshold γ = 2.96, chosen to flag 90% of full handshakes:
+
+| Sample | median min-distance | flagged |
+|---|---|---|
+| full handshake (leave-one-out) | 1.11 | **93.3%** |
+| resumed handshake | 81.80 | **0%** |
+| handshake flight split in 2 | 13.17 | **0%** |
+| handshake flight split in 4 | 29.68 | **0%** |
+
+**Both evade. They are not equally trustworthy.**
+
+**Resumption's evasion is structural.** A resumed handshake genuinely has no certificate chain, so the bytes
+the classifier keys on are not there to find. A censor could retrain on resumptions — but the resulting model
+flags *resumed TLS*, which is a large fraction of the whole Internet, and the collateral damage is the
+censor's problem rather than ours.
+
+**Interleaving's evasion is a training-set gap.** It works because the model never saw interleaved flows, not
+because the information is absent. Xue explicitly anticipate this: censors can adapt "by mirroring the
+padding schemes, training on padded versions of datasets, and leveraging packet directions over sizes." A
+censor could also simply redefine a burst to ignore sub-100-byte direction changes, which costs them nothing
+and erases the whole effect.
+
+**And a mechanical split is its own fingerprint.** Our test injected 64-byte records at exact run midpoints.
+Regular small client records at geometric positions is a *new* signature, and precisely the mistake AEGIS
+warns about — synthetic regularity replacing human variability. If we implement this, the injections must
+follow genuine h2 flow-control semantics (receive-window driven), not a "split the burst in half" rule.
+
+**Verdict:** keep it as a cheap add-on on the wrapped path, where the strong triple would otherwise be
+exposed. Do not count it in the threat model. **Resumption routing is the load-bearing defence**; interleaving
+is a bonus that a motivated censor removes in one retraining cycle.
+
+### What this test does not show
+
+The model is trained **only on full handshakes**, which is why resumptions sit 74× further out than the
+training distribution. A censor training on real mixed TLS traffic — as Xue did, labelling with Zeek — gets a
+broader model that covers more. The result establishes *separation in the feature space*, not evasion of a
+deployed system. Our burst inputs also come from socket reads rather than packet capture; burst aggregation
+sums consecutive same-direction bytes so it is robust to read coalescing, but it is still an approximation.
 
 ## Still open
 

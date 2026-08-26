@@ -1,0 +1,17 @@
+corpus: 30 full handshakes, 30 confirmed resumptions
+
+Mahalanobis min-distance over sliding Wb=3 windows:
+  full handshake (leave-one-out)     median    1.11   p10    0.56   p90    2.96
+  resumed handshake                  median   81.80   p10   75.11   p90  110.75
+  handshake flight split in 2        median   13.17   p10   12.85   p90   13.62
+  handshake flight split in 4        median   29.68   p10   13.01   p90   31.19
+  ALL server runs split in 2         median   13.17   p10   12.85   p90   13.62
+  ALL server runs split in 4         median   29.68   p10   13.01   p90   31.19
+
+threshold gamma = 2.96  (flags 90% of full handshakes)
+  full (LOO)               flagged  28/ 30  =  93.3%
+  resumed                  flagged   0/ 30  =   0.0%
+  flight split in 2        flagged   0/ 30  =   0.0%
+  flight split in 4        flagged   0/ 30  =   0.0%
+  all runs split in 2      flagged   0/ 30  =   0.0%
+  all runs split in 4      flagged   0/ 30  =   0.0%

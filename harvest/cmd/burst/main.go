@@ -14,12 +14,41 @@ package main
 
 import (
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"sort"
 	"time"
 )
+
+// jsonOut, when set, receives one record per handshake for offline analysis.
+var jsonOut *os.File
+
+type record struct {
+	Host    string  `json:"host"`
+	Kind    string  `json:"kind"`
+	Resumed bool    `json:"resumed"`
+	Sizes   []int   `json:"sizes"`
+	Times   []int64 `json:"times_us"`
+}
+
+func emit(host, kind string, resumed bool, evs []ev) {
+	if jsonOut == nil {
+		return
+	}
+	r := record{Host: host, Kind: kind, Resumed: resumed}
+	for _, e := range evs {
+		v := e.n
+		if !e.out {
+			v = -v
+		}
+		r.Sizes = append(r.Sizes, v)
+		r.Times = append(r.Times, e.t.Microseconds())
+	}
+	b, _ := json.Marshal(r)
+	fmt.Fprintln(jsonOut, string(b))
+}
 
 type ev struct {
 	out bool
@@ -131,6 +160,8 @@ func run(host string) {
 		return
 	}
 
+	emit(host, "full", false, full)
+	emit(host, "resumed", resumed, res)
 	bf, br := bursts(full), bursts(res)
 	fmt.Printf("  FULL     seq: %s\n", seqStr(full))
 	fmt.Printf("           bursts: %v\n", bf)
@@ -156,7 +187,17 @@ func firstServerBurst(b []int) int {
 }
 
 func main() {
-	hosts := os.Args[1:]
+	args := os.Args[1:]
+	if len(args) > 0 && args[0] == "-json" {
+		var err error
+		jsonOut, err = os.Create(args[1])
+		if err != nil {
+			panic(err)
+		}
+		defer jsonOut.Close()
+		args = args[2:]
+	}
+	hosts := args
 	if len(hosts) == 0 {
 		hosts = []string{"www.google.com", "www.cloudflare.com", "www.microsoft.com",
 			"github.com", "www.wikipedia.org", "www.amazon.com"}
