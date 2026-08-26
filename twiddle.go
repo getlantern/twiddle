@@ -167,8 +167,8 @@ func rerandECHGrease(e *Extension) error {
 type Options struct {
 	// CoverSNI replaces the harvested hello's server name.
 	CoverSNI string
-	// ServerStatic is the egress's long-term X25519 public key.
-	ServerStatic *ecdh.PublicKey
+	// Credential is the ticket and psk this client presents.
+	Credential *Credential
 	// TicketLen is the pre_shared_key ticket length. Real servers were measured
 	// at 32, 105, 176, 230 and 256 bytes; it should be stable per identity, since
 	// a server's ticket format does not vary connection to connection.
@@ -184,7 +184,7 @@ type Options struct {
 // The step order is load-bearing and is why this exists rather than callers
 // composing the pieces themselves:
 //
-//	SetSNI -> Rerandomize -> Shuffle -> SetPSKAuth
+//	SetSNI -> Rerandomize -> Shuffle -> SetKeyShare -> SetTicketAuth
 //
 // The binder is a MAC over the hello truncated at the binders, so it must be
 // computed over the FINAL byte layout. Shuffling after authenticating changes
@@ -207,8 +207,11 @@ func Twiddle(harvested []byte, opt Options) (wire []byte, eph *ecdh.PrivateKey, 
 	if err := h.Shuffle(); err != nil {
 		return nil, nil, err
 	}
-	eph, err = h.SetPSKAuth(opt.ServerStatic, opt.TicketLen, opt.BinderLen)
+	eph, err = h.SetKeyShare()
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := h.SetTicketAuth(opt.Credential, opt.BinderLen); err != nil {
 		return nil, nil, err
 	}
 	return h.Marshal(), eph, nil

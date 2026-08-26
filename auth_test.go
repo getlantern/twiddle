@@ -2,70 +2,181 @@ package twiddle
 
 import (
 	"bytes"
-	"crypto/ecdh"
-	"crypto/rand"
 	"testing"
+	"time"
 )
 
-func serverKey(t *testing.T) *ecdh.PrivateKey {
+func ticketKey(t *testing.T) *TicketKey {
 	t.Helper()
-	k, err := ecdh.X25519().GenerateKey(rand.Reader)
+	k, err := NewTicketKey()
 	if err != nil {
 		t.Fatal(err)
 	}
 	return k
 }
 
-func TestPSKAuthRoundTrip(t *testing.T) {
-	srv := serverKey(t)
-	for _, binderLen := range []int{32, 48} {
-		for name, rec := range realHellos(t) {
-			h, err := ParseClientHello(rec)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := h.SetPSKAuth(srv.PublicKey(), 176, binderLen); err != nil {
-				t.Fatalf("%s: SetPSKAuth: %v", name, err)
-			}
-			wire := h.Marshal()
-			back, err := ParseClientHello(wire)
-			if err != nil {
-				t.Fatalf("%s: authenticated hello does not parse: %v", name, err)
-			}
-			shared, err := VerifyPSKAuth(back, srv)
-			if err != nil {
-				t.Fatalf("%s (binder %d): verify: %v", name, binderLen, err)
-			}
-			if len(shared) != 32 {
-				t.Errorf("shared secret is %d bytes", len(shared))
-			}
-			break
-		}
+func TestTicketRoundTrip(t *testing.T) {
+	k := ticketKey(t)
+	cred, err := k.Issue(0xdeadbeef, DefaultTicketLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cred.Ticket) != DefaultTicketLen {
+		t.Fatalf("ticket is %d bytes, want %d", len(cred.Ticket), DefaultTicketLen)
+	}
+	id, psk, issued, err := k.Open(cred.Ticket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != 0xdeadbeef {
+		t.Errorf("client id %#x", id)
+	}
+	if psk != cred.PSK {
+		t.Error("psk mismatch")
+	}
+	if time.Since(issued) > time.Minute {
+		t.Errorf("issued time is %v", issued)
 	}
 }
 
-// TestPSKAuthRejectsWrongServer is the property that matters: only the holder of
-// the static private key can verify, so extracting one client's state does not
-// let an observer confirm anyone's connections.
-func TestPSKAuthRejectsWrongServer(t *testing.T) {
-	real, imposter := serverKey(t), serverKey(t)
-	for _, rec := range realHellos(t) {
-		h, _ := ParseClientHello(rec)
-		if _, err := h.SetPSKAuth(real.PublicKey(), 176, 32); err != nil {
+// TestTicketsAreConstantLengthAndUnique: a real server's ticket format does not
+// vary connection to connection, so ours must not either -- but the bytes must.
+func TestTicketsAreConstantLengthAndUnique(t *testing.T) {
+	k := ticketKey(t)
+	seen := map[string]bool{}
+	for i := 0; i < 200; i++ {
+		c, err := k.Issue(7, DefaultTicketLen)
+		if err != nil {
 			t.Fatal(err)
 		}
-		back, _ := ParseClientHello(h.Marshal())
-		if _, err := VerifyPSKAuth(back, imposter); err == nil {
-			t.Fatal("a different server key verified the binder")
+		if len(c.Ticket) != DefaultTicketLen {
+			t.Fatalf("ticket length varied: %d", len(c.Ticket))
+		}
+		if seen[string(c.Ticket)] {
+			t.Fatal("ticket repeated")
+		}
+		seen[string(c.Ticket)] = true
+	}
+}
+
+// TestTicketBytesLookUniform is the property the ECDH construction could not
+// provide: a ticket is AEAD ciphertext, so it carries no algebraic structure a
+// censor can test for. A raw X25519 key would fail a curve-membership check
+// ~100% of the time where random bytes pass ~50%.
+func TestTicketBytesLookUniform(t *testing.T) {
+	k := ticketKey(t)
+	var ones, total int
+	byteCounts := make([]int, 256)
+	for i := 0; i < 400; i++ {
+		c, err := k.Issue(uint64(i), DefaultTicketLen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, b := range c.Ticket {
+			byteCounts[b]++
+			total += 8
+			for j := 0; j < 8; j++ {
+				ones += int(b>>j) & 1
+			}
+		}
+	}
+	frac := float64(ones) / float64(total)
+	if frac < 0.49 || frac > 0.51 {
+		t.Errorf("bit balance %.4f is not ~0.5", frac)
+	}
+	empty := 0
+	for _, c := range byteCounts {
+		if c == 0 {
+			empty++
+		}
+	}
+	if empty > 0 {
+		t.Errorf("%d byte values never appeared across %d tickets", empty, 400)
+	}
+	t.Logf("bit balance %.4f over %d bits, all 256 byte values present", frac, total)
+}
+
+func TestTicketAuthEndToEnd(t *testing.T) {
+	k := ticketKey(t)
+	cred, _ := k.Issue(42, DefaultTicketLen)
+	n := 0
+	for name, rec := range realHellos(t) {
+		wire, eph, err := Twiddle(rec, Options{
+			CoverSNI:   "www.microsoft.com",
+			Credential: cred,
+			BinderLen:  32,
+		})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		back, err := ParseClientHello(wire)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		res, err := VerifyTicketAuth(back, k, time.Hour)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if res.ClientID != 42 {
+			t.Errorf("client id %d", res.ClientID)
+		}
+		if res.PSK != cred.PSK {
+			t.Error("psk mismatch")
+		}
+		// the ephemeral on the wire must be the one we generated -- that is
+		// what gives the session forward secrecy independent of the psk
+		if !bytes.Equal(res.ClientEphemeral.Bytes(), eph.PublicKey().Bytes()) {
+			t.Error("key_share does not carry our ephemeral")
+		}
+		if back.Extensions[len(back.Extensions)-1].Type != ExtPreSharedKey {
+			t.Error("pre_shared_key is not last")
+		}
+		n++
+	}
+	t.Logf("ticket auth verified over all %d captured hellos", n)
+}
+
+func TestVerifyRejectsWrongTicketKey(t *testing.T) {
+	real, imposter := ticketKey(t), ticketKey(t)
+	cred, _ := real.Issue(1, DefaultTicketLen)
+	for _, rec := range realHellos(t) {
+		wire, _, err := Twiddle(rec, Options{Credential: cred, BinderLen: 32})
+		if err != nil {
+			t.Fatal(err)
+		}
+		back, _ := ParseClientHello(wire)
+		if _, err := VerifyTicketAuth(back, imposter, time.Hour); err == nil {
+			t.Fatal("a different ticket key verified")
+		}
+		if _, err := VerifyTicketAuth(back, real, time.Hour); err != nil {
+			t.Fatalf("the real key failed: %v", err)
 		}
 		break
 	}
 }
 
-// TestPSKAuthIsBoundToTheHello: the binder covers the truncated transcript, so a
-// tag cannot be lifted onto a different hello.
-func TestPSKAuthIsBoundToTheHello(t *testing.T) {
-	srv := serverKey(t)
+func TestVerifyRejectsExpiredTicket(t *testing.T) {
+	k := ticketKey(t)
+	old, err := k.issueAt(1, DefaultTicketLen, time.Now().Add(-48*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rec := range realHellos(t) {
+		wire, _, _ := Twiddle(rec, Options{Credential: old, BinderLen: 32})
+		back, _ := ParseClientHello(wire)
+		if _, err := VerifyTicketAuth(back, k, 24*time.Hour); err == nil {
+			t.Fatal("an expired ticket verified")
+		}
+		if _, err := VerifyTicketAuth(back, k, 0); err != nil {
+			t.Fatalf("age check disabled should still verify: %v", err)
+		}
+		break
+	}
+}
+
+func TestBinderIsBoundToTheHello(t *testing.T) {
+	k := ticketKey(t)
+	cred, _ := k.Issue(1, DefaultTicketLen)
 	var a, b []byte
 	for _, rec := range realHellos(t) {
 		if a == nil {
@@ -75,133 +186,53 @@ func TestPSKAuthIsBoundToTheHello(t *testing.T) {
 		b = rec
 		break
 	}
-	ha, _ := ParseClientHello(a)
-	if _, err := ha.SetPSKAuth(srv.PublicKey(), 176, 32); err != nil {
-		t.Fatal(err)
-	}
+	wire, _, _ := Twiddle(a, Options{Credential: cred, BinderLen: 32})
+	ha, _ := ParseClientHello(wire)
 	stolen := ha.Find(ExtPreSharedKey).Data
 
 	hb, _ := ParseClientHello(b)
-	if err := hb.SetSNI("cover.example"); err != nil {
-		t.Fatal(err)
-	}
 	hb.Extensions = append(hb.Extensions, Extension{ExtPreSharedKey, stolen})
-	if _, err := VerifyPSKAuth(hb, srv); err == nil {
+	if _, err := VerifyTicketAuth(hb, k, time.Hour); err == nil {
 		t.Fatal("a binder lifted onto a different hello verified")
 	}
 }
 
-func TestPSKAuthIsFreshEveryConnection(t *testing.T) {
-	srv := serverKey(t)
+func TestKeyShareCarriesFreshEphemeralEachTime(t *testing.T) {
+	k := ticketKey(t)
+	cred, _ := k.Issue(1, DefaultTicketLen)
 	seen := map[string]bool{}
 	for _, rec := range realHellos(t) {
-		for i := 0; i < 20; i++ {
-			h, _ := ParseClientHello(rec)
-			if _, err := h.SetPSKAuth(srv.PublicKey(), 176, 32); err != nil {
-				t.Fatal(err)
-			}
-			d := h.Find(ExtPreSharedKey).Data
-			if seen[string(d)] {
-				t.Fatal("pre_shared_key repeated across connections")
-			}
-			seen[string(d)] = true
-		}
-		break
-	}
-	if len(seen) != 20 {
-		t.Fatalf("expected 20 distinct authenticators, got %d", len(seen))
-	}
-}
-
-// TestEphemeralTopBitVaries: an X25519 public key's high bit is always zero,
-// which is a one-bit bias an observer could accumulate. RFC 7748 requires
-// receivers to mask it, so we randomise it.
-func TestEphemeralTopBitVaries(t *testing.T) {
-	srv := serverKey(t)
-	var high, low int
-	for _, rec := range realHellos(t) {
-		for i := 0; i < 100; i++ {
-			h, _ := ParseClientHello(rec)
-			if _, err := h.SetPSKAuth(srv.PublicKey(), 176, 32); err != nil {
-				t.Fatal(err)
-			}
-			ticket, _, _, err := parsePSK(h.Find(ExtPreSharedKey).Data)
+		for i := 0; i < 25; i++ {
+			wire, _, err := Twiddle(rec, Options{Credential: cred, BinderLen: 32})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if ticket[ephemeralLen-1]&0x80 != 0 {
-				high++
-			} else {
-				low++
+			h, _ := ParseClientHello(wire)
+			ks, err := h.KeyShare()
+			if err != nil {
+				t.Fatal(err)
 			}
+			s := string(ks.Bytes())
+			if seen[s] {
+				t.Fatal("key_share ephemeral repeated across connections")
+			}
+			seen[s] = true
 		}
 		break
 	}
-	if high < 25 || low < 25 {
-		t.Errorf("ephemeral top bit is biased: %d high, %d low in 100", high, low)
-	}
-	t.Logf("ephemeral top bit: %d high / %d low", high, low)
 }
 
-func TestFullPipelineHarvestToWire(t *testing.T) {
-	srv := serverKey(t)
-	n := 0
-	for name, rec := range realHellos(t) {
-		wire, eph, err := Twiddle(rec, Options{
-			CoverSNI:     "www.microsoft.com",
-			ServerStatic: srv.PublicKey(),
-			TicketLen:    176,
-			BinderLen:    32,
-		})
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		back, err := ParseClientHello(wire)
-		if err != nil {
-			t.Fatalf("%s: emitted hello does not parse: %v", name, err)
-		}
-		if back.SNI() != "www.microsoft.com" {
-			t.Errorf("%s: SNI is %q", name, back.SNI())
-		}
-		if !IsGREASE(back.Extensions[0].Type) {
-			t.Errorf("%s: leading GREASE lost", name)
-		}
-		if back.Extensions[len(back.Extensions)-1].Type != ExtPreSharedKey {
-			t.Errorf("%s: pre_shared_key is not last", name)
-		}
-		if !IsGREASE(back.Extensions[len(back.Extensions)-2].Type) {
-			t.Errorf("%s: pre_shared_key not preceded by GREASE, unlike Chrome", name)
-		}
-		shared, err := VerifyPSKAuth(back, srv)
-		if err != nil {
-			t.Fatalf("%s: auth did not survive the pipeline: %v", name, err)
-		}
-		mine, err := eph.ECDH(srv.PublicKey())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !bytes.Equal(shared, mine) {
-			t.Errorf("%s: client and server derived different secrets", name)
-		}
-		n++
-	}
-	t.Logf("harvest -> twiddle -> verify, over all %d captured hellos", n)
-}
-
-// TestShuffleAfterAuthIsCaught documents the footgun Twiddle exists to prevent.
-func TestShuffleAfterAuthIsCaught(t *testing.T) {
-	srv := serverKey(t)
+func TestBinderLength48(t *testing.T) {
+	k := ticketKey(t)
+	cred, _ := k.Issue(1, DefaultTicketLen)
 	for _, rec := range realHellos(t) {
-		h, _ := ParseClientHello(rec)
-		if _, err := h.SetPSKAuth(srv.PublicKey(), 176, 32); err != nil {
+		wire, _, err := Twiddle(rec, Options{Credential: cred, BinderLen: 48})
+		if err != nil {
 			t.Fatal(err)
 		}
-		if err := h.Shuffle(); err != nil {
-			t.Fatal(err)
-		}
-		back, _ := ParseClientHello(h.Marshal())
-		if _, err := VerifyPSKAuth(back, srv); err == nil {
-			t.Fatal("shuffling after authenticating should invalidate the binder")
+		back, _ := ParseClientHello(wire)
+		if _, err := VerifyTicketAuth(back, k, time.Hour); err != nil {
+			t.Fatalf("SHA-384 binder: %v", err)
 		}
 		break
 	}

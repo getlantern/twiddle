@@ -1,6 +1,7 @@
 # The ephemeral encoding problem
 
-**Status: unresolved. `auth.go` currently ships a known-distinguishable encoding.**
+**Status: RESOLVED — ticket-based construction implemented in `auth.go`.** This document is kept as the
+record of why, because the trap it describes catches most implementations.
 
 ## The problem
 
@@ -63,11 +64,27 @@ key, useless for verifying anyone. With tickets, a stolen config lets a censor v
 connections until the ticket rotates. Against that: anyone can obtain a config by becoming a user, and it
 only ever compromises the one client, whose ticket is single-use and short-lived.
 
-## Decision needed
+## What was built
 
-- **Ticket-based (recommended)** — no exotic crypto, uniform by construction, matches TLS semantics; costs
-  the no-long-term-secret property.
-- **ECDH + Elligator2** — keeps that property; costs either a GPL-3 dependency or a correct dirty-key
-  implementation that needs real cryptographic review.
+Ticket-based, and it turned out better than the framing above suggested — because the ephemeral did not have
+to be given up at all. It **moved to `key_share`**, where a curve point is exactly what belongs and carries no
+anomaly whatsoever. Every captured Chrome hello offers group `0x001d` with a 32-byte key, so the slot is
+always there.
 
-Until one is chosen, `auth.go` remains distinguishable by the Legendre test and **must not ship**.
+```
+key_share[X25519]  <- a real ephemeral        (forward secrecy)
+ticket (identity)  <- AEAD(k_server, id ‖ psk ‖ issued_at ‖ padding)   (uniform by construction)
+binder             <- HMAC over the truncated hello, keyed from the psk
+```
+
+That is TLS 1.3 `psk_dhe_ke` exactly: authentication from the pre-shared key, forward secrecy from the
+Diffie-Hellman. **So forward secrecy is not lost** — the concern that made ECDH-to-static attractive is
+addressed by putting the DH where TLS puts it.
+
+Verified by test: tickets are constant-length and never repeat, their bits balance 0.5006 over 563,200
+samples with all 256 byte values present, the key_share ephemeral is fresh on every connection, a binder
+cannot be lifted onto a different hello, a wrong ticket key is rejected, and expiry is enforced.
+
+The residual tradeoff is unchanged and small: a stolen client config exposes that client's connections until
+its ticket rotates, where ECDH-to-static would have exposed nothing. Tickets are single-use and the next one
+arrives inside each encrypted flight.

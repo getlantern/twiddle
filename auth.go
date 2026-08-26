@@ -1,65 +1,148 @@
 package twiddle
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/ecdh"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/sha512"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash"
+	"crypto/sha512"
+	"time"
 )
 
-// Authentication rides in the PSK extension of a resumption ClientHello.
+// Authentication mirrors TLS 1.3 psk_dhe_ke, using the fields TLS already
+// provides rather than inventing carriers:
 //
-// RFC 8446 §4.2.11.2 defines the binder as
-//     HMAC(binder_key, Transcript-Hash(Truncate(ClientHello)))
-// which is a MAC over the opening keyed by a secret shared with the server --
-// exactly the side-door construction, in the field TLS already defines for it.
-// So the authenticator is not injected into a foreign protocol; it populates the
-// slot the protocol provides.
+//	key_share[X25519]  <- a real ephemeral public key (forward secrecy)
+//	ticket (identity)  <- AEAD(k_server, client_id ‖ psk ‖ issued_at ‖ padding)
+//	binder             <- HMAC over the truncated hello, keyed from the psk
 //
-//	ticket (identity)  <- ephemeral X25519 public key, then random padding
-//	binder             <- MAC over the truncated hello under ECDH(eph, server_pk)
+// The ticket is uniform BY CONSTRUCTION because it is AEAD ciphertext, which is
+// exactly what a real session ticket is. That sidesteps the problem an ECDH
+// value in this position would have: only about half of all field elements are
+// valid Curve25519 u-coordinates, so a raw public key here is separable from
+// random bytes by one Legendre-symbol test. See docs/uniform-ephemeral.md.
 //
-// Both fields are opaque BY SPECIFICATION: a ticket is server-chosen opaque data
-// and a binder is an HMAC under a key derived from it. No observer can validate
-// either without the resumption secret, which makes them the only ClientHello
-// fields unverifiable by construction rather than by convention.
+// The ephemeral moves to key_share, where a curve point is precisely what
+// belongs and carries no anomaly at all. Every captured Chrome hello offers
+// group 0x001d with a 32-byte key, so there is always a slot for it.
 //
-// KNOWN LIMITATION -- see docs/uniform-ephemeral.md. The ephemeral is written
-// into the ticket as a raw X25519 public key, and only about half of all field
-// elements are valid Curve25519 u-coordinates, so one Legendre-symbol test
-// distinguishes it from the uniform AEAD ciphertext a real ticket carries. The
-// top-bit bias below is fixed; curve membership is not. This must be resolved
-// before the transport ships.
-//
-// Deriving the MAC key from ECDH to the server's static key keeps the
-// verifiable-only-by-the-server property: no symmetric secret is shared across
-// clients, so extracting one client's state does not let a censor confirm
-// anyone else's connections.
+// Forward secrecy therefore comes from the key_share, not the psk -- the same
+// division of labour TLS 1.3 uses, and the reason psk_dhe_ke exists.
 
 const (
-	ephemeralLen = 32
-	domainSep    = "twiddle/psk-auth/v1"
+	// TicketOverhead is nonce + GCM tag + the fixed plaintext fields.
+	ticketNonceLen = 12
+	ticketTagLen   = 16
+	ticketFixed    = 8 + 32 + 8 // client_id ‖ psk ‖ issued_at
+	MinTicketLen   = ticketNonceLen + ticketTagLen + ticketFixed
+
+	// DefaultTicketLen matches the middle of the range measured from real
+	// servers (32, 105, 176, 230, 256 bytes). It must be stable per identity: a
+	// server's ticket format does not vary connection to connection.
+	DefaultTicketLen = 176
+
+	GroupX25519 uint16 = 0x001d
 )
 
-// TicketLen returns a plausible ticket length. Measured from real servers:
-// 32 B (github), 105 B (Go's crypto/tls), 176 B (cloudflare), 230 B (google),
-// 256 B (microsoft). A ticket must be at least the ephemeral length.
-func TicketLen(n int) int {
-	if n < ephemeralLen+8 {
-		return 128
-	}
-	return n
+// TicketKey is a server's long-term ticket-encryption key. It never leaves the
+// egress; clients hold only issued tickets.
+type TicketKey [32]byte
+
+// Credential is what a client presents: an opaque ticket plus the psk it is
+// paired with. The first arrives by provisioning; each connection's reply
+// carries the next, exactly as NewSessionTicket does.
+type Credential struct {
+	Ticket []byte
+	PSK    [32]byte
 }
 
-// binderHash picks the hash for the binder. Its length must match the hash of
-// the cipher suite the ServerHello selects -- 32 bytes for SHA-256 suites, 48
-// for SHA-384. A mismatch is a free structural tell, so this is not a free
-// choice at the framing layer.
+func NewTicketKey() (*TicketKey, error) {
+	k := new(TicketKey)
+	if _, err := rand.Read(k[:]); err != nil {
+		return nil, err
+	}
+	return k, nil
+}
+
+func (k *TicketKey) aead() (cipher.AEAD, error) {
+	b, err := aes.NewCipher(k[:])
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(b)
+}
+
+// Issue mints a credential. ticketLen is the total on-wire ticket size; the
+// plaintext is padded to fill it so every ticket this server issues is the same
+// length, as a real server's would be.
+func (k *TicketKey) Issue(clientID uint64, ticketLen int) (*Credential, error) {
+	return k.issueAt(clientID, ticketLen, time.Now())
+}
+
+func (k *TicketKey) issueAt(clientID uint64, ticketLen int, now time.Time) (*Credential, error) {
+	if ticketLen < MinTicketLen {
+		return nil, fmt.Errorf("twiddle: ticket length %d below minimum %d", ticketLen, MinTicketLen)
+	}
+	aead, err := k.aead()
+	if err != nil {
+		return nil, err
+	}
+	cred := &Credential{}
+	if _, err := rand.Read(cred.PSK[:]); err != nil {
+		return nil, err
+	}
+
+	plain := make([]byte, ticketLen-ticketNonceLen-ticketTagLen)
+	binary.BigEndian.PutUint64(plain[0:8], clientID)
+	copy(plain[8:40], cred.PSK[:])
+	binary.BigEndian.PutUint64(plain[40:48], uint64(now.Unix()))
+	if _, err := rand.Read(plain[ticketFixed:]); err != nil {
+		return nil, err
+	}
+
+	nonce := make([]byte, ticketNonceLen)
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	cred.Ticket = aead.Seal(nonce, nonce, plain, nil)
+	return cred, nil
+}
+
+// Open recovers a ticket's contents. Only the holder of the ticket key can do
+// this, which is what keeps the authenticator verifiable by the server alone.
+func (k *TicketKey) Open(ticket []byte) (clientID uint64, psk [32]byte, issued time.Time, err error) {
+	if len(ticket) < MinTicketLen {
+		return 0, psk, issued, errors.New("twiddle: ticket too short")
+	}
+	aead, err := k.aead()
+	if err != nil {
+		return 0, psk, issued, err
+	}
+	plain, err := aead.Open(nil, ticket[:ticketNonceLen], ticket[ticketNonceLen:], nil)
+	if err != nil {
+		return 0, psk, issued, errors.New("twiddle: ticket does not decrypt")
+	}
+	if len(plain) < ticketFixed {
+		return 0, psk, issued, errMalformed
+	}
+	clientID = binary.BigEndian.Uint64(plain[0:8])
+	copy(psk[:], plain[8:40])
+	issued = time.Unix(int64(binary.BigEndian.Uint64(plain[40:48])), 0)
+	return clientID, psk, issued, nil
+}
+
+func binderKey(psk []byte) []byte {
+	m := hmac.New(sha256.New, psk)
+	m.Write([]byte("twiddle/binder/v1"))
+	return m.Sum(nil)
+}
+
 func binderHash(binderLen int) (func() hash.Hash, error) {
 	switch binderLen {
 	case sha256.Size:
@@ -71,51 +154,90 @@ func binderHash(binderLen int) (func() hash.Hash, error) {
 	}
 }
 
-// SetPSKAuth installs a fresh authenticator into the hello's pre_shared_key
-// extension, creating it if absent. Returns the ephemeral private key so the
-// caller can derive the same secret the server will.
-func (h *ClientHello) SetPSKAuth(serverStatic *ecdh.PublicKey, ticketLen, binderLen int) (*ecdh.PrivateKey, error) {
-	newHash, err := binderHash(binderLen)
-	if err != nil {
-		return nil, err
+// SetKeyShare replaces the X25519 entry's public key with a real ephemeral,
+// leaving every other offered group untouched. Returns the private key.
+func (h *ClientHello) SetKeyShare() (*ecdh.PrivateKey, error) {
+	e := h.Find(ExtKeyShare)
+	if e == nil {
+		return nil, errors.New("twiddle: hello has no key_share")
 	}
-	ticketLen = TicketLen(ticketLen)
-
 	priv, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, err
 	}
-	shared, err := priv.ECDH(serverStatic)
-	if err != nil {
-		return nil, err
+	pub := priv.PublicKey().Bytes()
+	d := e.Data
+	p := 2
+	for p+4 <= len(d) {
+		g := binary.BigEndian.Uint16(d[p : p+2])
+		n := int(binary.BigEndian.Uint16(d[p+2 : p+4]))
+		if p+4+n > len(d) {
+			return nil, errMalformed
+		}
+		if g == GroupX25519 && n == len(pub) {
+			copy(d[p+4:p+4+n], pub)
+			return priv, nil
+		}
+		p += 4 + n
 	}
-
-	ticket := make([]byte, ticketLen)
-	copy(ticket, priv.PublicKey().Bytes())
-	if _, err := rand.Read(ticket[ephemeralLen:]); err != nil {
-		return nil, err
-	}
-	// An X25519 public key is a field element below 2^255-19, so its top bit is
-	// always zero -- a one-bit bias a censor could accumulate over samples.
-	// RFC 7748 §5 requires receivers to mask that bit, so randomising it is free.
-	if _, err := randomizeTopBit(ticket); err != nil {
-		return nil, err
-	}
-
-	var age [4]byte
-	if _, err := rand.Read(age[:]); err != nil {
-		return nil, err
-	}
-	setPSK(h, ticket, age, make([]byte, binderLen))
-	binder := hmac.New(newHash, macKey(shared))
-	binder.Write(truncateForBinder(h.Marshal(), binderLen))
-	setPSK(h, ticket, age, binder.Sum(nil))
-	return priv, nil
+	return nil, errors.New("twiddle: hello offers no X25519 key_share")
 }
 
-// VerifyPSKAuth recomputes the binder using the server's static private key.
-// It returns the shared secret on success so the caller can derive tunnel keys.
-func VerifyPSKAuth(h *ClientHello, serverStatic *ecdh.PrivateKey) ([]byte, error) {
+// KeyShare returns the client's offered X25519 public key.
+func (h *ClientHello) KeyShare() (*ecdh.PublicKey, error) {
+	e := h.Find(ExtKeyShare)
+	if e == nil {
+		return nil, errors.New("twiddle: hello has no key_share")
+	}
+	d := e.Data
+	p := 2
+	for p+4 <= len(d) {
+		g := binary.BigEndian.Uint16(d[p : p+2])
+		n := int(binary.BigEndian.Uint16(d[p+2 : p+4]))
+		if p+4+n > len(d) {
+			return nil, errMalformed
+		}
+		if g == GroupX25519 {
+			return ecdh.X25519().NewPublicKey(d[p+4 : p+4+n])
+		}
+		p += 4 + n
+	}
+	return nil, errors.New("twiddle: hello offers no X25519 key_share")
+}
+
+// SetTicketAuth installs the credential and computes the binder over the final
+// byte layout. Call it last -- see Twiddle.
+func (h *ClientHello) SetTicketAuth(cred *Credential, binderLen int) error {
+	newHash, err := binderHash(binderLen)
+	if err != nil {
+		return err
+	}
+	var age [4]byte
+	if _, err := rand.Read(age[:]); err != nil {
+		return err
+	}
+	setPSK(h, cred.Ticket, age, make([]byte, binderLen))
+	m := hmac.New(newHash, binderKey(cred.PSK[:]))
+	m.Write(truncateForBinder(h.Marshal(), binderLen))
+	setPSK(h, cred.Ticket, age, m.Sum(nil))
+	return nil
+}
+
+// AuthResult is what a verified opening yields.
+type AuthResult struct {
+	ClientID        uint64
+	PSK             [32]byte
+	Issued          time.Time
+	ClientEphemeral *ecdh.PublicKey
+}
+
+// VerifyTicketAuth authenticates a hello. maxAge bounds ticket lifetime; pass 0
+// to skip the check.
+func VerifyTicketAuth(h *ClientHello, k *TicketKey, maxAge time.Duration) (*AuthResult, error) {
+	return verifyAt(h, k, maxAge, time.Now())
+}
+
+func verifyAt(h *ClientHello, k *TicketKey, maxAge time.Duration, now time.Time) (*AuthResult, error) {
 	e := h.Find(ExtPreSharedKey)
 	if e == nil {
 		return nil, errors.New("twiddle: hello carries no pre_shared_key")
@@ -124,22 +246,14 @@ func VerifyPSKAuth(h *ClientHello, serverStatic *ecdh.PrivateKey) ([]byte, error
 	if err != nil {
 		return nil, err
 	}
-	if len(ticket) < ephemeralLen {
-		return nil, errors.New("twiddle: ticket too short to carry an ephemeral")
-	}
-	newHash, err := binderHash(len(binder))
+	clientID, psk, issued, err := k.Open(ticket)
 	if err != nil {
 		return nil, err
 	}
-
-	eph := make([]byte, ephemeralLen)
-	copy(eph, ticket[:ephemeralLen])
-	eph[ephemeralLen-1] &= 0x7f // undo the top-bit randomisation, per RFC 7748
-	pub, err := ecdh.X25519().NewPublicKey(eph)
-	if err != nil {
-		return nil, fmt.Errorf("twiddle: bad ephemeral: %w", err)
+	if maxAge > 0 && now.Sub(issued) > maxAge {
+		return nil, fmt.Errorf("twiddle: ticket is %v old, limit %v", now.Sub(issued).Truncate(time.Second), maxAge)
 	}
-	shared, err := serverStatic.ECDH(pub)
+	newHash, err := binderHash(len(binder))
 	if err != nil {
 		return nil, err
 	}
@@ -147,30 +261,17 @@ func VerifyPSKAuth(h *ClientHello, serverStatic *ecdh.PrivateKey) ([]byte, error
 	probe := *h
 	probe.Extensions = append([]Extension(nil), h.Extensions...)
 	setPSK(&probe, ticket, age, make([]byte, len(binder)))
-	want := hmac.New(newHash, macKey(shared))
-	want.Write(truncateForBinder(probe.Marshal(), len(binder)))
-	if !hmac.Equal(want.Sum(nil), binder) {
+	m := hmac.New(newHash, binderKey(psk[:]))
+	m.Write(truncateForBinder(probe.Marshal(), len(binder)))
+	if !hmac.Equal(m.Sum(nil), binder) {
 		return nil, errors.New("twiddle: binder does not verify")
 	}
-	return shared, nil
-}
 
-func macKey(shared []byte) []byte {
-	k := sha256.Sum256(append([]byte(domainSep), shared...))
-	return k[:]
-}
-
-// randomizeTopBit flips the high bit of the ephemeral's final byte at random.
-func randomizeTopBit(ticket []byte) (bool, error) {
-	var b [1]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return false, err
+	eph, err := h.KeyShare()
+	if err != nil {
+		return nil, err
 	}
-	if b[0]&1 == 1 {
-		ticket[ephemeralLen-1] |= 0x80
-		return true, nil
-	}
-	return false, nil
+	return &AuthResult{ClientID: clientID, PSK: psk, Issued: issued, ClientEphemeral: eph}, nil
 }
 
 // truncateForBinder drops the binders list, mirroring RFC 8446's Truncate().
@@ -182,19 +283,14 @@ func truncateForBinder(rec []byte, binderLen int) []byte {
 	return rec[:len(rec)-cut]
 }
 
-// setPSK writes the pre_shared_key extension and moves it to the end.
-//
-// RFC 8446 §4.2.11 requires pre_shared_key to be the last extension, and the
-// binder is a MAC over the hello truncated at the binders -- so "last" is not a
-// style choice, it is what makes the truncation well defined.
-//
-// obfuscated_ticket_age is a caller-supplied constant rather than generated
-// here, because this is called twice per authentication (once with a zero
-// binder to build the transcript, once with the real one) and any field that
-// differed between those calls would break verification.
+// setPSK writes pre_shared_key and moves it to the end. RFC 8446 §4.2.11
+// requires it last, and that is what makes the binder truncation well defined.
+// obfuscated_ticket_age is caller-supplied because this runs twice per
+// authentication and any field differing between the two calls would break
+// verification.
 func setPSK(h *ClientHello, ticket []byte, age [4]byte, binder []byte) {
 	d := make([]byte, 0, 11+len(ticket)+len(binder))
-	d = appendU16(d, uint16(len(ticket)+6)) // identities list
+	d = appendU16(d, uint16(len(ticket)+6))
 	d = appendU16(d, uint16(len(ticket)))
 	d = append(d, ticket...)
 	d = append(d, age[:]...)
