@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>twiddle — a TLS ClientHello, byte by byte</title>
+<meta name="description" content="A TLS-shaped transport built from genuine harvested ClientHellos. Every byte we change, and the measurement that justified it.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Serif:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <p class="eyebrow rise">getlantern/twiddle</p>
+    <h1 class="rise">Ordinary<br>on the wire.</h1>
+    <p class="lede narrow rise">
+      A censorship-resistant transport whose opening bytes are a <strong>genuine ClientHello
+      harvested from a real browser</strong>. We change seven things in it. Everything else
+      is exactly what Chrome sent.
+    </p>
+    <p class="tagline rise">
+      A gray sedan on a motorway is not hidden. It is simply not worth pulling over —<br>
+      and pulling it over means pulling over ten thousand identical cars.
+    </p>
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">01 — the opening</p>
+    <h2>Why only the first two records matter</h2>
+    <div class="narrow">
+      <p>
+        Every TLS 1.3 handshake message after the ServerHello is encrypted and framed as an
+        <code>application_data</code> record. Measured against real servers, the entire observable
+        structure of a TLS connection is four records and then opaque noise forever.
+      </p>
+      <p>
+        So the connection does not have to <em>be</em> TLS. It has to <em>open</em> like TLS. Everything
+        past the ServerHello is shape, not protocol — which is why a harvested ClientHello, a
+        synthesised ServerHello, and an ordinary AEAD tunnel are indistinguishable from the real thing.
+      </p>
+    </div>
+    <table>
+      <tr><th>Record</th><th>Type</th><th>Fidelity required</th></tr>
+      <tr><td>ClientHello</td><td class="num">0x16</td><td><em>exact</em> — harvested from a real browser</td></tr>
+      <tr><td>ChangeCipherSpec</td><td class="num">0x14</td><td>one fixed byte</td></tr>
+      <tr><td>ServerHello</td><td class="num">0x16</td><td>structurally plausible — 1221 B, measured</td></tr>
+      <tr><td>everything after, forever</td><td class="num">0x17</td><td>shape only — opaque to any observer</td></tr>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">02 — the bytes</p>
+    <h2>A real ClientHello, and what we touch</h2>
+    <p class="narrow">
+      Below is an actual ClientHello captured from Chrome 151, byte for byte — <span id="total"></span> of them.
+      Hover any byte, or any field in the list, to see what it is and whether we change it.
+      Notice how little is coloured.
+    </p>
+
+    <div class="legend">
+      <span><i class="sw-keep"></i>copied verbatim</span>
+      <span><i class="sw-twiddle"></i>twiddled</span>
+      <span><i class="sw-frame"></i>length, recomputed</span>
+      <span><i class="sw-add"></i>appended by us</span>
+    </div>
+
+    <div class="byteview">
+      <div>
+        <div class="grid" id="grid"></div>
+        <ul class="fields" id="fields"></ul>
+      </div>
+      <aside class="panel" id="panel">
+        <span class="tag keep" id="ptag">hover a byte</span>
+        <h3 id="pname">The whole record</h3>
+        <div class="where" id="pwhere"></div>
+        <p id="pnote">Chrome permutes its extension order on every single connection — eight
+        connections produced eight distinct orderings. So there is no canonical order to preserve,
+        and appending <code>pre_shared_key</code> is legal against any harvested hello.</p>
+      </aside>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">03 — the seven</p>
+    <h2>Every field we change, and why</h2>
+    <table>
+      <tr><th>Field</th><th>What we do</th><th>Why</th></tr>
+      <tr><td class="num">server_name</td><td>rewrite</td><td>Point the SNI at the cover domain this egress masquerades as. The only length change we make deliberately — it cascades through five nested length fields.</td></tr>
+      <tr><td class="num">random</td><td>re-randomise</td><td>32 bytes of client entropy. Replaying a captured value would repeat one browser's nonce across every connection we make.</td></tr>
+      <tr><td class="num">legacy_session_id</td><td>re-randomise</td><td>Chrome sends 32 random bytes here on every hello measured. The server must echo it, so anything hidden here appears <em>twice</em> on the wire.</td></tr>
+      <tr><td class="num">key_share</td><td>fresh, valid keys</td><td>A real X25519 <em>and</em> a real ML-KEM-768 key each time. Filling them with random bytes made live servers reply <code>illegal_parameter</code> — which would have handed a censor a replay distinguisher.</td></tr>
+      <tr><td class="num">encrypted_client_hello</td><td>re-randomise + resize</td><td>Chrome's GREASE ECH varies per connection in 32-byte buckets — 186, 218, 250, 282 — independently of SNI length. uTLS holds it constant, which is its own tell.</td></tr>
+      <tr><td class="num">extension order</td><td>shuffle</td><td>Chrome permutes the interior on <em>every</em> connection. Emitting a fixed order is something Chrome never does, so shuffling is fidelity, not obfuscation.</td></tr>
+      <tr><td class="num">pre_shared_key</td><td>append</td><td>Carries the authenticator. RFC 8446 requires it last, so appending is the only legal placement — and it turns a full hello into a resumption hello, which is what we want to look like.</td></tr>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">04 — authentication</p>
+    <h2>The binder is already a MAC over the opening</h2>
+    <div class="narrow">
+      <p>
+        RFC 8446 §4.2.11.2 defines the PSK binder as
+        <code>HMAC(binder_key, Transcript-Hash(Truncate(ClientHello)))</code> — a MAC over the opening,
+        keyed by a secret shared with the server. That is exactly the authenticator we needed, in the
+        field TLS already provides for it. We are not injecting anything foreign; we are populating
+        the slot the protocol defines.
+      </p>
+      <p>
+        Both halves are opaque <em>by specification</em>: a ticket is server-chosen opaque data, and a
+        binder is an HMAC under a key derived from it. No observer can validate either without the
+        resumption secret. They are the only ClientHello fields unverifiable by construction rather
+        than by convention.
+      </p>
+    </div>
+    <table>
+      <tr><th>Carries</th><th>TLS 1.3 field</th><th>Size</th></tr>
+      <tr><td>forward secrecy</td><td class="num">key_share[X25519]</td><td class="num">a real ephemeral</td></tr>
+      <tr><td>identity + psk</td><td class="num">ticket</td><td class="num">AEAD ciphertext — uniform by construction</td></tr>
+      <tr><td>proof of possession</td><td class="num">binder</td><td class="num">32 B (SHA-256) / 48 B (SHA-384)</td></tr>
+    </table>
+    <p class="narrow">
+      This is TLS 1.3 <code>psk_dhe_ke</code> exactly — authentication from the pre-shared key,
+      forward secrecy from the Diffie-Hellman.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">05 — the reply</p>
+    <h2>A ServerHello we synthesise</h2>
+    <p class="narrow">
+      Five real servers were measured, and every one produced an identical layout. The size is set
+      almost entirely by the post-quantum key share, whose server value is opaque bytes — so
+      synthesising it is easy, and the number to hit is exact rather than a range.
+    </p>
+    <div class="stats">
+      <div class="stat"><span class="n">1215 B</span><span class="l">full handshake ServerHello, all five servers</span></div>
+      <div class="stat"><span class="n">1221 B</span><span class="l">resumed — the extra 6 B is <code>pre_shared_key</code></span></div>
+      <div class="stat"><span class="n">1120 B</span><span class="l">of that is the X25519MLKEM768 key share</span></div>
+      <div class="stat"><span class="n">±0 B</span><span class="l">variance across google, cloudflare, microsoft, amazon, wikipedia</span></div>
+    </div>
+    <p class="narrow">
+      Under this design the ML-KEM half never has to be real — it is opaque to any observer and both
+      ends of the connection are ours. What must be right is what a censor can actually check: the
+      group id, the total length, and the structure around them. The real key agreement rides in the
+      X25519 half.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">06 — probe resistance</p>
+    <h2>Anything that fails to authenticate reaches a real site</h2>
+    <div class="narrow">
+      <p>
+        Because the ServerHello is synthesised, the egress cannot complete a genuine handshake with a
+        peer it does not recognise. That makes the splitting egress load-bearing rather than optional
+        hardening: an active prober <em>must</em> be forwarded to a real TLS server, byte for byte,
+        or it has confirmed the transport by getting anything else.
+      </p>
+    </div>
+    <figure class="fig">
+      <svg viewBox="0 0 900 340" role="img" xmlns="http://www.w3.org/2000/svg"
+           aria-label="A client sends a harvested ClientHello carrying an authenticator to the egress. If the binder verifies, the egress replies with a synthesised ServerHello and an AEAD tunnel. If it does not, every byte the peer sent is replayed to a real cover site, which answers with a genuine TLS handshake.">
+        <defs>
+          <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+          </marker>
+          <marker id="aw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#f0a500"/>
+          </marker>
+        </defs>
+
+        <!-- lifelines -->
+        <g font-family="IBM Plex Mono, monospace" font-size="13" fill="currentColor">
+          <text x="70"  y="20" text-anchor="middle">client</text>
+          <text x="450" y="20" text-anchor="middle">egress</text>
+          <text x="830" y="20" text-anchor="middle">cover site</text>
+        </g>
+        <g stroke="currentColor" stroke-opacity=".22" stroke-dasharray="3 5">
+          <line x1="70"  y1="32" x2="70"  y2="324"/>
+          <line x1="450" y1="32" x2="450" y2="324"/>
+          <line x1="830" y1="32" x2="830" y2="324"/>
+        </g>
+
+        <g font-family="IBM Plex Mono, monospace" font-size="11.5">
+          <!-- opening -->
+          <line x1="70" y1="58" x2="444" y2="58" stroke="#f0a500" stroke-width="1.5" marker-end="url(#aw)"/>
+          <text x="257" y="50" text-anchor="middle" fill="#f0a500">harvested ClientHello + authenticator</text>
+
+          <rect x="392" y="70" width="116" height="22" rx="3" fill="currentColor" fill-opacity=".07" stroke="currentColor" stroke-opacity=".2"/>
+          <text x="450" y="85" text-anchor="middle" fill="currentColor">verify binder</text>
+
+          <!-- authenticated branch -->
+          <rect x="20" y="108" width="470" height="96" rx="4" fill="#f0a500" fill-opacity=".05" stroke="#f0a500" stroke-opacity=".22"/>
+          <text x="34" y="126" fill="#f0a500" font-size="10.5" letter-spacing="1.4">AUTHENTICATED</text>
+          <line x1="444" y1="148" x2="76" y2="148" stroke="currentColor" stroke-width="1.3" marker-end="url(#a)"/>
+          <text x="260" y="141" text-anchor="middle" fill="currentColor">synthesised ServerHello · 1221 B</text>
+          <line x1="444" y1="176" x2="76" y2="176" stroke="currentColor" stroke-width="1.3" marker-end="url(#a)"/>
+          <text x="260" y="169" text-anchor="middle" fill="currentColor">flight — carries the next ticket</text>
+          <line x1="76" y1="196" x2="444" y2="196" stroke="currentColor" stroke-width="2.5" stroke-opacity=".45"/>
+          <text x="260" y="190" text-anchor="middle" fill="currentColor" fill-opacity=".75">AEAD tunnel, framed as 0x17 records</text>
+
+          <!-- rejected branch -->
+          <rect x="20" y="216" width="856" height="100" rx="4" fill="currentColor" fill-opacity=".04" stroke="currentColor" stroke-opacity=".16"/>
+          <text x="34" y="234" fill="currentColor" fill-opacity=".7" font-size="10.5" letter-spacing="1.4">ErrNotOurs</text>
+          <line x1="456" y1="258" x2="824" y2="258" stroke="currentColor" stroke-width="1.3" marker-end="url(#a)"/>
+          <text x="640" y="251" text-anchor="middle" fill="currentColor">replay every byte the peer sent, verbatim</text>
+          <line x1="824" y1="290" x2="76" y2="290" stroke="currentColor" stroke-width="1.3" marker-end="url(#a)"/>
+          <text x="450" y="283" text-anchor="middle" fill="currentColor">a <tspan font-style="italic">real</tspan> TLS handshake, from the actual site</text>
+        </g>
+      </svg>
+      <figcaption>
+        The egress never speaks for itself to a peer it cannot authenticate — a prober's own bytes
+        arrive at a genuine server, and the reply is that server's.
+      </figcaption>
+    </figure>
+
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">07 — measurement</p>
+    <h2>Numbers that changed the design</h2>
+    <p class="narrow">
+      Every decision here came from measuring real traffic rather than reasoning about it. Several
+      measurements overturned what we had already built.
+    </p>
+    <div class="stats">
+      <div class="stat"><span class="n">8 / 8</span><span class="l">connections gave <em>distinct</em> extension orders — Chrome shuffles every time</span></div>
+      <div class="stat"><span class="n">4.1%</span><span class="l">of real browsing connections are resumptions, across 254 origins — not the 70% we assumed</span></div>
+      <div class="stat"><span class="n">26,802</span><span class="l">records profiled to fit the shaping layer</span></div>
+      <div class="stat"><span class="n">1395 B</span><span class="l">dominant server record size — 26% of all of them</span></div>
+      <div class="stat"><span class="n">11.9×</span><span class="l">bandwidth amplification from pad-only shaping, before we measured it</span></div>
+      <div class="stat"><span class="n">64 / 64</span><span class="l">captured hellos round-trip byte-for-byte through our parser</span></div>
+    </div>
+    <div class="narrow">
+      <p>
+        The resumption number is the sharpest example. We designed a whole second mode around the
+        assumption that most connections resume; measurement said 4.1%, and the mode was cut. Browsers
+        open connections to an origin in a parallel burst, so every connection in the burst starts
+        before any session ticket has arrived — one origin took 17 connections and resumed none of them.
+      </p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>
+      Source: <a href="https://github.com/getlantern/twiddle">github.com/getlantern/twiddle</a> ·
+      zero external dependencies ·
+      part of <a href="https://lantern.io">Lantern</a>
+    </p>
+    <p class="note">
+      The ClientHello rendered above is a real capture, included in the repository as test data.
+      Its SNI is <code>localhost</code> — it was captured against a local server, not a person's browsing.
+    </p>
+  </div>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

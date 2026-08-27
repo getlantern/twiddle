@@ -1,5 +1,8 @@
 # twiddle
 
+**[→ twiddle.pages.dev](https://twiddle.pages.dev)** — an interactive byte-by-byte walkthrough of a real
+ClientHello, every field we change, and the measurement behind each decision. Source in [`site/`](site).
+
 A TLS-shaped transport whose opening bytes are a **genuine ClientHello harvested from a real browser**,
 whose ServerHello is synthesised, and whose payload is an ordinary AEAD tunnel framed as TLS
 `application_data` (`0x17`) records.
