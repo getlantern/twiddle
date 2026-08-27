@@ -67,7 +67,7 @@ Run the tools from `harvest/` — paths default to `testdata/`.
 **Phase 0** — wire-format spike. The protocol packages do not exist yet; only the measurement tooling that
 established the design is here.
 
-This repo is **private** during Phases 0–1 and flips to **public before Phase 2**, when
-`lantern-box/protocol/twiddle` begins importing it (a public module importing a private one forces
-credentials into every build). The full design, measurements and rollout plan live in `getlantern/discovery-engine`, which is
+This repo is **public**. It went public when `lantern-box/protocol/twiddle` began importing it: a public
+module importing a private one forces credentials into every build, and CI proved the point by failing to
+fetch it. The full design, measurements and rollout plan live in `getlantern/discovery-engine`, which is
 private — references to it here will not resolve for outside readers.
