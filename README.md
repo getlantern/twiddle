@@ -69,5 +69,5 @@ established the design is here.
 
 This repo is **private** during Phases 0–1 and flips to **public before Phase 2**, when
 `lantern-box/protocol/twiddle` begins importing it (a public module importing a private one forces
-credentials into every build). The full design, measurements and rollout plan live in
-`getlantern/discovery-engine`.
+credentials into every build). The full design, measurements and rollout plan live in `getlantern/discovery-engine`, which is
+private — references to it here will not resolve for outside readers.

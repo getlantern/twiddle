@@ -58,7 +58,7 @@ never performs a DH. Tickets rotate — the server issues the next one inside th
 **This is literally TLS 1.3 resumption**, which is a virtue: the semantics match the thing we are imitating,
 so there is nothing to get subtly wrong.
 
-**The tradeoff.** [authentication.md](https://github.com/getlantern/discovery-engine) chose ECDH-to-a-static-key
+**The tradeoff.** The authentication design (`getlantern/discovery-engine`, private) chose ECDH-to-a-static-key
 so the client holds *no* long-term secret: obtaining a client's config would teach a censor only a public
 key, useless for verifying anyone. With tickets, a stolen config lets a censor verify that client's
 connections until the ticket rotates. Against that: anyone can obtain a config by becoming a user, and it

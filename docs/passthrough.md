@@ -81,7 +81,7 @@ theatrical ClientHello and the wrapped inner ClientHello **in the same flight**;
 immediately forwards. One RTT to first byte — the same as unproxied TLS.
 
 This makes the opening effectively 0-RTT, which means the replay cache in
-[authentication.md](https://github.com/getlantern/discovery-engine) is load-bearing rather than optional.
+the authentication design (`getlantern/discovery-engine`, private) is load-bearing rather than optional.
 
 ## Detection is optional, and it is not a TUN feature
 
