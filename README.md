@@ -1,6 +1,6 @@
 # twiddle
 
-**[→ twiddle-7qq.pages.dev](https://twiddle-7qq.pages.dev)** — an interactive byte-by-byte walkthrough of a real
+**[→ twiddle.lantern.io](https://twiddle.lantern.io)** — an interactive byte-by-byte walkthrough of a real
 ClientHello, every field we change, and the measurement behind each decision. Source in [`site/`](site).
 
 A TLS-shaped transport whose opening bytes are a **genuine ClientHello harvested from a real browser**,

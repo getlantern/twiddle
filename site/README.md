@@ -18,9 +18,9 @@ Either connect this repo in the Cloudflare Pages dashboard with **build command:
 wrangler pages deploy site --project-name twiddle --branch main
 ```
 
-Live at **https://twiddle-7qq.pages.dev**. Note the suffix: `twiddle.pages.dev` is already taken by
-an unrelated account, and `pages.dev` subdomains are global rather than per-account, so Cloudflare
-assigned `twiddle-7qq` when the project was created. A custom domain would avoid the awkward name.
+Live at **https://twiddle.lantern.io** (custom domain; the project's own `pages.dev` name is
+`twiddle-7qq`, because `twiddle.pages.dev` is taken by an unrelated account and those subdomains are
+global rather than per-account).
 
 ## Regenerating the byte map
 
