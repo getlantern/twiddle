@@ -76,6 +76,9 @@ var echGREASELengths = []int{144, 176, 208, 240}
 // uTLS holds ECH GREASE constant where Chrome varies it, so a harvested hello
 // replayed without this would repeat one connection's random values.
 func (h *ClientHello) Rerandomize() error {
+	if err := h.rerandGREASE(); err != nil {
+		return err
+	}
 	if _, err := rand.Read(h.Random[:]); err != nil {
 		return err
 	}
@@ -158,8 +161,179 @@ func freshKeyShare(group uint16, out []byte) error {
 		return nil
 
 	default:
-		_, err := rand.Read(out)
+		// A GREASE placeholder. Chrome sends exactly one zero byte here --
+		// measured 0x00 on 15 of 15 key_share GREASE entries across the pool's
+		// Chrome and Chrome 152. An earlier version filled this with random
+		// bytes on the theory that GREASE contents are arbitrary; they are not
+		// arbitrary in practice, and randomising a byte the browser always
+		// leaves zero is wrong 255 times in 256, deterministically, on every
+		// connection we open.
+		zero(out)
+		return nil
+	}
+}
+
+// greaseValues are the 16 GREASE codepoints of RFC 8701.
+const greaseCount = 16
+
+// greaseValue draws one uniformly. The codepoints are 0x0a0a, 0x1a1a, ...
+// 0xfafa, i.e. 0x0a0a + n*0x1010.
+func greaseValue() (uint16, error) {
+	n, err := rand.Int(rand.Reader, big.NewInt(greaseCount))
+	if err != nil {
+		return 0, err
+	}
+	return 0x0a0a + uint16(n.Int64())*0x1010, nil
+}
+
+// rerandGREASE redraws every GREASE codepoint in the hello.
+//
+// Nothing else re-randomises these, which made them the one field a pooled
+// hello uniquely contributed: a pool of eight entries emitted eight fixed
+// GREASE draws forever, where Chrome redraws per connection from all sixteen
+// values. Across many connections that is a distinguisher, and a cheap one --
+// no reassembly, no statistics, just the observation that this host's draws
+// come from a set of eight and repeat.
+//
+// Six slots, measured across the embedded pool and Chrome 152:
+//
+//	cipher_suites[0]           independent draw
+//	first extension type       independent draw
+//	last extension type        independent, and MUST differ from the first
+//	supported_groups           independent draw, but see below
+//	key_share group            the SAME value as supported_groups
+//	supported_versions[0]      independent draw
+//	signature_algorithms       independent draw (Chrome 152; absent earlier)
+//
+// The two coupled ones are coupled by the protocol, not by taste: a key_share
+// entry names a group the client offered, so a GREASE key_share whose group is
+// not in supported_groups is a contradiction no browser produces. The
+// distinctness of the two extension draws is BoringSSL's own rule, observed on
+// 15 of 15 hellos.
+//
+// Collisions ACROSS slots are left alone because real hellos have them --
+// pool[3] drew 0xfafa for both its cipher and its trailing extension.
+func (h *ClientHello) rerandGREASE() error {
+	cipher, err := greaseValue()
+	if err != nil {
 		return err
+	}
+	ext1, err := greaseValue()
+	if err != nil {
+		return err
+	}
+	ext2, err := greaseValue()
+	if err != nil {
+		return err
+	}
+	for ext2 == ext1 {
+		if ext2, err = greaseValue(); err != nil {
+			return err
+		}
+	}
+	group, err := greaseValue()
+	if err != nil {
+		return err
+	}
+	version, err := greaseValue()
+	if err != nil {
+		return err
+	}
+	sigAlg, err := greaseValue()
+	if err != nil {
+		return err
+	}
+
+	for i, c := range h.CipherSuites {
+		if IsGREASE(c) {
+			h.CipherSuites[i] = cipher
+		}
+	}
+
+	// First and last GREASE extension types. Rerandomize runs before Shuffle,
+	// so these are still where the browser put them, and Shuffle then pins them
+	// in place.
+	var greased []int
+	for i := range h.Extensions {
+		if IsGREASE(h.Extensions[i].Type) {
+			greased = append(greased, i)
+		}
+	}
+	for n, i := range greased {
+		switch {
+		case n == 0:
+			h.Extensions[i].Type = ext1
+		case n == len(greased)-1:
+			h.Extensions[i].Type = ext2
+		default:
+			// No measured hello has an interior GREASE extension; if one turns
+			// up, give it its own draw rather than aliasing an end.
+			v, err := greaseValue()
+			if err != nil {
+				return err
+			}
+			h.Extensions[i].Type = v
+		}
+	}
+
+	if e := h.Find(ExtSupportedGroups); e != nil {
+		replaceGREASEInU16List(e.Data, 2, group)
+	}
+	if e := h.Find(ExtKeyShare); e != nil {
+		replaceGREASEKeyShareGroup(e.Data, group)
+	}
+	if e := h.Find(ExtSupportedVersions); e != nil {
+		replaceGREASEInU16List(e.Data, 1, version)
+	}
+	if e := h.Find(ExtSignatureAlgorithms); e != nil {
+		replaceGREASEInU16List(e.Data, 2, sigAlg)
+	}
+	return nil
+}
+
+// replaceGREASEInU16List rewrites every GREASE codepoint in a length-prefixed
+// list of uint16s, in place and without changing any length. hdr is the size of
+// the list's own length prefix: 2 bytes for supported_groups and
+// signature_algorithms, 1 for supported_versions.
+func replaceGREASEInU16List(d []byte, hdr int, v uint16) {
+	if len(d) < hdr {
+		return
+	}
+	var n int
+	switch hdr {
+	case 1:
+		n = int(d[0])
+	case 2:
+		n = int(binary.BigEndian.Uint16(d[0:2]))
+	default:
+		return
+	}
+	end := hdr + n
+	if end > len(d) {
+		end = len(d)
+	}
+	for p := hdr; p+2 <= end; p += 2 {
+		if IsGREASE(binary.BigEndian.Uint16(d[p : p+2])) {
+			binary.BigEndian.PutUint16(d[p:p+2], v)
+		}
+	}
+}
+
+// replaceGREASEKeyShareGroup rewrites the group of every GREASE KeyShareEntry,
+// leaving each entry's length and contents untouched.
+func replaceGREASEKeyShareGroup(d []byte, v uint16) {
+	if len(d) < 2 {
+		return
+	}
+	for p := 2; p+4 <= len(d); {
+		n := int(binary.BigEndian.Uint16(d[p+2 : p+4]))
+		if IsGREASE(binary.BigEndian.Uint16(d[p : p+2])) {
+			binary.BigEndian.PutUint16(d[p:p+2], v)
+		}
+		if p+4+n > len(d) {
+			return
+		}
+		p += 4 + n
 	}
 }
 

@@ -35,9 +35,17 @@ const (
 	ExtServerName    uint16 = 0x0000
 	ExtSessionTicket uint16 = 0x0023
 	ExtPreSharedKey  uint16 = 0x0029
+	ExtEarlyData     uint16 = 0x002a
 	ExtKeyShare      uint16 = 0x0033
 	ExtECH           uint16 = 0xfe0d
 	ExtServerPadding uint16 = 0x12e0
+
+	// These three carry a GREASE codepoint inside their bodies, which is the
+	// only reason this package looks inside an extension it otherwise holds
+	// opaque. See rerandGREASE.
+	ExtSupportedGroups     uint16 = 0x000a
+	ExtSignatureAlgorithms uint16 = 0x000d
+	ExtSupportedVersions   uint16 = 0x002b
 )
 
 var errMalformed = errors.New("twiddle: malformed ClientHello")
@@ -166,6 +174,12 @@ func (h *ClientHello) Marshal() []byte {
 }
 
 func appendU16(b []byte, v uint16) []byte { return append(b, byte(v>>8), byte(v)) }
+
+func zero(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
+}
 
 // Find returns the first extension of the given type, or nil.
 func (h *ClientHello) Find(t uint16) *Extension {
