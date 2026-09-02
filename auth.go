@@ -384,14 +384,30 @@ func PSKFirstForCover(host string) bool {
 	}
 }
 
-// MeasuredCovers lists the cover identities whose real servers have been
-// measured, and which therefore have a correct TicketLenForCover and
-// PSKFirstForCover rather than the fallback.
+// MeasuredCovers lists the cover identities this package can actually
+// impersonate: their real servers have been measured, AND the measured ticket
+// length is one we can issue.
 //
-// Choosing a cover is a deployment decision that depends on where the egress
-// sits and what is reachable from the censored region, so this package does not
-// make it -- but a cover from outside this list is emitting an unmeasured
-// ticket length, which shows up directly in the size of every resumption hello.
+// The second condition excludes github.com, which is measured at a 32-byte
+// ticket. Our authenticator does not fit: it carries an 8-byte client id, the
+// 32-byte PSK and an 8-byte timestamp, sealed under a 12-byte nonce and a
+// 16-byte tag, so MinTicketLen is 76. Issuing a 76-byte ticket while claiming
+// to be a server that issues 32-byte ones would put a 44-byte discrepancy in
+// the size of every resumption hello -- so github is not a viable cover at all,
+// rather than a cover with a rough edge. The measurement stays in
+// TicketLenForCover as a record of why.
+//
+// Choosing among the rest is a deployment decision that depends on where the
+// egress sits and what is reachable from the censored region, so this package
+// does not make it -- but a cover from outside this list is emitting an
+// unmeasured ticket length, which again shows up in every resumption hello.
 func MeasuredCovers() []string {
-	return []string{"www.cloudflare.com", "www.google.com", "www.microsoft.com", "github.com"}
+	measured := []string{"www.cloudflare.com", "www.google.com", "www.microsoft.com", "github.com"}
+	out := make([]string, 0, len(measured))
+	for _, host := range measured {
+		if TicketLenForCover(host) >= MinTicketLen {
+			out = append(out, host)
+		}
+	}
+	return out
 }

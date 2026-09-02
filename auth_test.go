@@ -2,6 +2,7 @@ package twiddle
 
 import (
 	"bytes"
+	"slices"
 	"testing"
 	"time"
 )
@@ -242,10 +243,26 @@ func TestBinderLength48(t *testing.T) {
 // come from the same host. Every cover this package claims to have measured
 // must therefore answer both.
 func TestMeasuredCoversHaveBothParameters(t *testing.T) {
+	k, err := NewTicketKey()
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, host := range MeasuredCovers() {
 		if got := TicketLenForCover(host); got == DefaultTicketLen && host != "www.cloudflare.com" {
 			t.Errorf("%s: ticket length fell back to the default (%d)", host, got)
 		}
+		// A cover we cannot issue a ticket for is not a cover we can
+		// impersonate. Offering one would fail at provisioning time, which is
+		// how github.com was caught.
+		if _, err := k.Issue(1, TicketLenForCover(host)); err != nil {
+			t.Errorf("%s is offered as a cover but its ticket length is unusable: %v", host, err)
+		}
+	}
+	if slices.Contains(MeasuredCovers(), "github.com") {
+		t.Error("github.com is measured at 32 bytes, below MinTicketLen; it must not be offered")
+	}
+	if TicketLenForCover("github.com") != 32 {
+		t.Error("the github.com measurement should stay recorded even though it is unusable")
 	}
 	// The fallback host must still be answerable, not panic or hang.
 	if got := TicketLenForCover("unmeasured.example"); got != DefaultTicketLen {
