@@ -237,3 +237,27 @@ func TestBinderLength48(t *testing.T) {
 		break
 	}
 }
+
+// Ticket length and PSK order are both measured per cover identity and must
+// come from the same host. Every cover this package claims to have measured
+// must therefore answer both.
+func TestMeasuredCoversHaveBothParameters(t *testing.T) {
+	for _, host := range MeasuredCovers() {
+		if got := TicketLenForCover(host); got == DefaultTicketLen && host != "www.cloudflare.com" {
+			t.Errorf("%s: ticket length fell back to the default (%d)", host, got)
+		}
+	}
+	// The fallback host must still be answerable, not panic or hang.
+	if got := TicketLenForCover("unmeasured.example"); got != DefaultTicketLen {
+		t.Errorf("unmeasured host got %d, want the default %d", got, DefaultTicketLen)
+	}
+	if PSKFirstForCover("unmeasured.example") {
+		t.Error("an unmeasured host should default to PSK last, the measured majority")
+	}
+	// The two hosts measured as PSK-first must report it.
+	for _, host := range []string{"www.google.com", "www.cloudflare.com"} {
+		if !PSKFirstForCover(host) {
+			t.Errorf("%s was measured PSK-first", host)
+		}
+	}
+}

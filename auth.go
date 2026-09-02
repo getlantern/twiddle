@@ -7,11 +7,11 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash"
-	"crypto/sha512"
 	"time"
 )
 
@@ -360,4 +360,38 @@ func TicketLenForCover(host string) int {
 	default:
 		return DefaultTicketLen
 	}
+}
+
+// PSKFirstForCover reports whether the named cover identity's real server puts
+// pre_shared_key BEFORE its other ServerHello extensions.
+//
+// Real servers differ and are individually consistent, so this is a property of
+// the identity being impersonated rather than a choice. It lives next to
+// TicketLenForCover because both are measured per cover and both have to agree
+// with the same host: provisioning that took the ticket length from one server
+// and the extension order from another would produce a ServerHello no single
+// real server emits.
+//
+// Measured by harvest/cmd/shresume against the same hosts.
+func PSKFirstForCover(host string) bool {
+	switch host {
+	case "www.google.com", "www.cloudflare.com":
+		return true
+	default:
+		// microsoft, amazon and wikipedia all place it last, and that is also
+		// the safer default for an unmeasured host: it is the majority.
+		return false
+	}
+}
+
+// MeasuredCovers lists the cover identities whose real servers have been
+// measured, and which therefore have a correct TicketLenForCover and
+// PSKFirstForCover rather than the fallback.
+//
+// Choosing a cover is a deployment decision that depends on where the egress
+// sits and what is reachable from the censored region, so this package does not
+// make it -- but a cover from outside this list is emitting an unmeasured
+// ticket length, which shows up directly in the size of every resumption hello.
+func MeasuredCovers() []string {
+	return []string{"www.cloudflare.com", "www.google.com", "www.microsoft.com", "github.com"}
 }
