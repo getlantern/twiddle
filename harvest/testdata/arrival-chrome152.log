@@ -1,0 +1,113 @@
+Packetisation of Chrome's opening flight, TCP and QUIC.
+
+  tool     cmd/arrival
+  client   Google Chrome 152.0.7977.66, macOS 25.5.0 arm64, headless=new,
+           fresh --user-data-dir per launch
+  target   127.0.0.1 (an IP literal, so no DNS resolution of any kind occurs
+           and no HTTPS RR can be fetched)
+  method   neither listener ever answers; the client sends its opening flight
+           on connect and then retransmits
+
+TCP -- how many writes carry the ClientHello
+------------------------------------------------------------------------------
+tcp 1: ClientHello 1919 B in 1 write(s): [1919B@0.63ms]
+tcp 2: ClientHello 1951 B in 1 write(s): [1951B@0.10ms]
+tcp 4: ClientHello 2015 B in 1 write(s): [2015B@0.09ms]
+
+Every hello arrived in a single read. Loopback MTU is 16384, so this measures
+WRITE boundaries, not segments: Chrome hands the whole ClientHello to the
+socket in one write and lets the kernel segment it. twiddle's single
+raw.Write(wire) in handshake.go is therefore the faithful behaviour, and
+deliberately splitting the write would NOT be.
+
+Path segmentation follows from the length alone. At 1919-2015 B a hello spans
+two segments at any common MSS (1460, 1440, 1400, 1360) and three only below
+MSS ~1008 -- so on TCP the "three packets" case does not arise in practice.
+
+QUIC -- how many datagrams carry the ClientHello
+------------------------------------------------------------------------------
+udp  1: 1250 B  Initial  from :55283 @    0.00ms   <-- opening flight
+udp  2: 1250 B  Initial  from :55283 @    2.08ms   <-- opening flight
+udp  3: 1250 B  Initial  from :55283 @  302.63ms   retransmit
+udp  4: 1250 B  Initial  from :55283 @  906.06ms   retransmit
+udp  5: 1250 B  Initial  from :55283 @ 2111.90ms   retransmit
+udp  6: 1250 B  Initial  from :55283 @ 4002.58ms   retransmit
+udp  7: 1250 B  Initial  from :58801 @ 5027.89ms   second attempt, new port
+udp  8: 1250 B  Initial  from :58801 @ 5028.04ms
+udp  9: 1250 B  Initial  from :58801 @ 5332.32ms
+udp 10: 1250 B  Initial  from :58801 @ 5935.15ms
+udp 11: 1250 B  Initial  from :58801 @ 7139.25ms
+udp 12: 1250 B  Initial  from :58801 @ 8949.08ms
+
+The opening flight is TWO Initial datagrams sent back to back, each padded to
+Chrome's 1250-byte max packet size. A ~1950-byte ClientHello does not fit one
+Initial once the post-quantum key_share is in it, so it is split across CRYPTO
+frames in consecutive packets -- which is also what Chaos Protection does on
+purpose, splitting and reordering CRYPTO frames and interleaving PADDING/PING.
+A larger hello (a real SNI instead of an IP literal, the top ECH bucket, more
+ALPN) pushes this to three datagrams; two is the floor, not the norm.
+
+Retransmits back off ~300ms / 600ms / 1200ms / 1900ms, then the attempt is
+abandoned and a fresh connection opens from a new source port.
+
+Hello contents, same captures
+------------------------------------------------------------------------------
+ 1919 B  ECH ext=186  exts=18  0xca34=yes  0x12e0=no
+ 1919 B  ECH ext=186  exts=18  0xca34=yes  0x12e0=no
+ 1919 B  ECH ext=186  exts=18  0xca34=yes  0x12e0=no
+ 1951 B  ECH ext=218  exts=18  0xca34=yes  0x12e0=no
+ 1951 B  ECH ext=218  exts=18  0xca34=yes  0x12e0=no
+ 1983 B  ECH ext=250  exts=18  0xca34=yes  0x12e0=no
+ 2015 B  ECH ext=282  exts=18  0xca34=yes  0x12e0=no
+
+Six findings:
+
+1. ECH GREASE is present on 7 of 7 hellos to a bare IP literal. No DNS query
+   was made, so no HTTPS RR and no ECHConfig could have been fetched, and no
+   DoH resolver was reachable. Chrome sends GREASE ECH unconditionally -- it is
+   not gated on secure DNS. See docs/ech.md.
+
+2. The ECH extension length takes exactly the four values 186/218/250/282,
+   unchanged from the buckets measured on the older Chrome that produced
+   pool/chrome.hex. echGREASELengths in twiddle.go is still correct.
+
+3. 0xca34 is present on every hello and appears in no pooled hello; 0x12e0
+   (BoringSSL server_padding) is present on four pooled hellos and on none of
+   these. The pooled extension set is not Chrome 152's.
+
+4. All 7 hellos, across two separate Chrome launches with different fresh
+   profiles, fingerprint as ONE build (5cf4f560d630d302) once the GREASE cipher
+   suite, the GREASE extension values, the extension order and the ECH bucket
+   are normalised away. That is the invariant Coherent relies on.
+
+5. 0xca34's BODY varies per connection at a constant 206 bytes. Normalising
+   away everything the emitter regenerates still leaves these 7 hellos in two
+   distinct canonical forms, and 0xca34 is the field that separates them:
+
+     hello 1: 00cc 04d679090e 08839a648c9b2d0107 08839a648c9b2d0109 ...
+     hello 0: 00cc 0582df1302 0108839a648c9b2d0107 08839a648c9b2d010c ...
+
+   The 00cc prefix is a 204-byte list length, and the entries look like
+   length-prefixed opaque identifiers -- consistent with Trust Anchor
+   Identifiers. Nothing in twiddle regenerates this, so same-build hellos are
+   NOT interchangeable and a device pool holding several is sampling real
+   variation. See the known-gaps list in README.md.
+
+6. GREASE, measured across all 15 hellos (8 pooled + 7 from Chrome 152), in six
+   slots. Two constraints held on every one:
+
+     - the first and last extension draws always DIFFER (BoringSSL's own rule)
+     - supported_groups' draw is always the SAME value as the key_share group,
+       which the protocol requires: a key_share names an offered group
+
+   Collisions across other slots do occur -- pool[3] drew 0xfafa for both its
+   cipher suite and its trailing extension -- so the draws are independent.
+   The GREASE key_share entry's payload was 0x00 on all 15.
+
+Reproduce:
+
+  go run ./cmd/arrival -conns 4 -hex /tmp/c152.hex
+  # then, per the addresses it prints:
+  chrome --user-data-dir=$(mktemp -d) --headless=new https://127.0.0.1:<tcp>/
+  chrome --user-data-dir=$(mktemp -d) --headless=new --enable-quic \
+         --origin-to-force-quic-on=127.0.0.1:<udp> https://127.0.0.1:<udp>/
