@@ -153,6 +153,33 @@ Why each piece:
 - **Nothing new is provisioned.** No new key material, no lantern-cloud or lantern-box change. The client
   already holds the credential; the server already holds the ticket key.
 
+### Measured: the covers publish no ECHConfig, so GREASE holds
+
+The carrier's length model only holds while Chrome sends *GREASE* ECH. A Chrome that obtains an ECHConfig
+sends **real** ECH, whose payload length is set by the encrypted inner hello rather than by
+`echGREASELengths` — which would make the model wrong. `arrival-chrome152.log` could not settle this: it
+captured hellos to a bare IP with no DNS, so real ECH was impossible there by construction.
+
+Settled now — `harvest/testdata/ech-config-published.log`. Querying the HTTPS RR across three independent
+resolvers, with `crypto.cloudflare.com` as a positive control that proves the method detects `ech=`:
+
+| host | ECHConfig published |
+|---|---|
+| `www.cloudflare.com` | no |
+| `www.google.com` | no |
+| `www.microsoft.com` | no |
+| `crypto.cloudflare.com` *(control)* | **yes** |
+
+None of the three cover identities publishes one, so a Chrome with secure DNS fully working still cannot
+fetch one for them and sends GREASE. **This is a stronger result than `docs/ech.md`'s**, which reaches the
+same conclusion for in-region clients via a contingent route — China censors encrypted DNS resolvers, so no
+config is fetched. Here the config does not exist to fetch, so the carrier holds for an unrestricted client
+too and does not depend on the censorship it is meant to survive.
+
+Note `www.cloudflare.com` itself does not enable ECH; only the demo host does. Cloudflare has enabled and
+rolled back ECH for customer zones before, so this is a **monitorable** condition, not a permanent one — the
+log carries the one-line check.
+
 ### The objection, which is real
 
 `docs/ech.md` concludes: *"ship ECH, and keep the ability to stop shipping it without shipping anything"* —
@@ -196,21 +223,13 @@ Costs, and why it is second choice:
 
 ## Open questions
 
-1. **Does a real Chrome in-region send GREASE ECH to our cover hosts, or real ECH?** The carrier assumes
-   GREASE. `docs/ech.md` argues in-region it is GREASE — China prevents real ECH indirectly by censoring
-   encrypted DNS resolvers, so no ECHConfig is fetched — and `arrival-chrome152.log` measured GREASE 7/7 to
-   a bare IP with no DNS. But that capture *could not* have produced real ECH. **Measure the DNS-enabled
-   case** before building: a Chrome with secure DNS on, against `www.cloudflare.com`, will fetch the HTTPS
-   RR and send real ECH, whose payload length is set by the encrypted inner hello rather than by
-   `echGREASELengths`. If in-region clients would send real ECH, the payload-length model is wrong for them.
-   This is the one measurement that can invalidate the carrier, so run it first.
-2. **Re-full cadence.** See "Mix policy" reasoning above: the censor's flow history is finite and the
+1. **Re-full cadence.** See "Mix policy" reasoning above: the censor's flow history is finite and the
    client's context changes, so some trigger — new local address, new egress IP, elapsed time — has to
    force a fresh full handshake rather than resuming forever off one observed predecessor.
-3. **Where credential rotation lives.** It currently rides a NewSessionTicket-shaped record, but cloudflare
+2. **Where credential rotation lives.** It currently rides a NewSessionTicket-shaped record, but cloudflare
    and google send **no** unprompted post-handshake records at all, so on those covers that record has no
    counterpart. Unchanged by this work, but it lands in the same code.
-4. **Full-path ticket length.** 144 bytes is proposed so every ECH bucket stays reachable. Confirm
+3. **Full-path ticket length.** 144 bytes is proposed so every ECH bucket stays reachable. Confirm
    `MinTicketLen` (76) leaves enough padding entropy, and decide whether the server should accept only 144
    or any length that decrypts.
 
@@ -233,7 +252,7 @@ Costs, and why it is second choice:
 5. Extend `cover_test.go`'s oracle. It cannot pin `FullRemainder` to a literal (probed, and it jitters);
    pin the *structure* — ServerHello length, record count, plausible range.
 6. Mix policy: first contact to an egress is full, later connections resume, plus the re-full trigger from
-   open question 2.
+   open question 1.
 
 ## Traps worth knowing before starting
 
