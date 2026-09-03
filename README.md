@@ -23,13 +23,15 @@ record. Measured against real servers, the entire observable structure of a TLS 
 |---|---|---|
 | ClientHello | `0x16` | **exact** — harvested from a real browser |
 | ChangeCipherSpec | `0x14` | one fixed byte |
-| ServerHello | `0x16` | structurally plausible (1210 B, PQ-sized `key_share`) |
+| ServerHello | `0x16` | structurally plausible (1221 B resumed, PQ-sized `key_share`) |
 | ChangeCipherSpec | `0x14` | one fixed byte |
 | everything else, forever | `0x17` | **shape only** — opaque to any observer |
 
 So the connection need not be TLS at all. That removes uTLS as a handshake engine, the `key_share`
 ephemeral splice, PSK binders as a cryptographic obligation, HelloRetryRequest, and the whole
-preset-staleness treadmill. This module depends on **no TLS library** for its own operation.
+preset-staleness treadmill. This module depends on **no TLS library** for its own operation — enforced by
+`TestShippedPackagesImportNoTLSLibrary`, not by memory. The measurement tooling under `harvest/` does use
+`crypto/tls`, and stays there so it cannot reach a shipped binary.
 
 ## Authentication
 
@@ -45,14 +47,14 @@ field only some browser installs send — BoringSSL's `server_padding` (`0x12e0`
 
 ## Where the hellos come from
 
-The pool is **data read off disk**, not a compiled-in constant, and `LoadPool` tries three sources in
-descending order of preference:
+`LoadPool` tries device and config sources in descending order of preference. Its compiled-in snapshot is
+available only through the explicit `AllowEmbedded` test fallback:
 
 | Source | Why it ranks here |
 |---|---|
 | **device** — tapped from this device's own outbound TLS | The only source that cannot go stale: by construction it is what the browser on *this* device emits right now, from the version installed here, with this device's field-trial state |
 | **config** — delivered by the config service | Refreshable without shipping a binary |
-| **embedded** — `pool/chrome.hex` | Works without provisioning; decays as Chrome moves |
+| **embedded** — `pool/chrome.hex` | Opt-in for tests only; already stale as Chrome moves |
 
 Sources are never merged, and an incoherent source is partitioned by build with the majority winning. A real
 browser install emits hellos from exactly one build, so a pool blending two would have this client
@@ -83,6 +85,7 @@ harvest/            capture and measurement tooling
   cmd/flight/       measure the server-side record profile of real TLS 1.3 servers
   cmd/tapproxy/     byte-tap in front of an upstream TLS server (0-RTT measurement)
   cmd/arrival/      how the opening flight is packetised: TCP writes, QUIC datagrams
+  cmd/postflight/   post-handshake and teardown records on a resumed connection
   cmd/sweep/        repeated captures for per-connection variance
   analyze.py        compare full vs resumption hellos
   compare_arms.py   compare capture arms (headless vs headful, profile state)
@@ -90,6 +93,7 @@ harvest/            capture and measurement tooling
 docs/               design notes, each backed by a measurement log
   ech.md            why the pooled hellos carry GREASE ECH, and what censors do to ECH
   packetisation.md  TCP writes vs QUIC datagrams; Chaos Protection and a future QUIC mode
+  coverprobe/       measure a cover's profile from the live upstream (needs a TLS stack)
 site/               source of twiddle.lantern.io, the byte-by-byte walkthrough
 ```
 
@@ -109,10 +113,12 @@ traffic over the AEAD record layer, and `go test` covers it over a real socket. 
 | `hello.go` | parse / marshal a ClientHello with extensions held opaque |
 | `twiddle.go` | `Shuffle`, `Rerandomize`, and the `Twiddle` emission pipeline |
 | `auth.go` | ticket issue/open, `key_share` ephemeral, binder MAC, verification |
-| `serverhello.go` | ServerHello synthesis at the measured 1210 B shape |
+| `serverhello.go` | ServerHello synthesis at the measured resumed shape, 1221 B |
 | `conn.go` | AEAD record layer framed as `application_data` |
 | `shaping.go` | record segmentation and padding to the measured browsing profile |
-| `source.go`, `pool.go` | hello sourcing: device tap, config, embedded fallback |
+| `cover.go` | per-cover profile: SNI, cipher, binder length, ticket length, PSK order, flight sizes |
+| `replay.go` | the single-use ticket gate, so an observed hello cannot be replayed back at us |
+| `source.go`, `pool.go` | hello sourcing: device tap, config, opt-in test fallback |
 | `harvest/` | the measurement tooling that established every number above |
 
 Not here yet, and both live on the consumer side rather than in this module:
@@ -121,8 +127,9 @@ Not here yet, and both live on the consumer side rather than in this module:
   caller must then forward those bytes verbatim to a real cover site, or an active prober gets silence where
   a real server would answer — see [`docs/passthrough.md`](docs/passthrough.md). The sing-box inbound below
   does this, replaying the peeked bytes byte for byte.
-- **Credential provisioning.** `TicketKey.Issue` mints credentials and the egress rotates them inside each
-  flight, but the first one has to arrive out of band.
+- **Credential provisioning.** `TicketKey.Issue` mints credentials and the egress rotates them in a
+  `NewSessionTicket`-shaped record sent after both Finisheds, but the first one has to arrive out of band.
+  Rotating inside the opening burst is what padded that burst to the wrong size.
 
 Known fidelity gaps, both measured:
 

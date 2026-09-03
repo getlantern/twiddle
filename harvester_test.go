@@ -43,6 +43,23 @@ func tappedVariant(t *testing.T, sni string, marker byte) []byte {
 	return h.Marshal()
 }
 
+// otherBuildVariant produces a hello from a DIFFERENT build than
+// tappedVariant's. The build fingerprint keys on the extension type/length
+// multiset, so giving 0xca34 a build-specific length makes this a distinct
+// build; marker varies the body so each sample is still a distinct
+// contribution within that build.
+func otherBuildVariant(t *testing.T, sni string, marker byte, build int) []byte {
+	t.Helper()
+	h, err := ParseClientHello(tapped(t, sni, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := h.Extensions[len(h.Extensions)-1]
+	h.Extensions = append(h.Extensions[:len(h.Extensions)-1:len(h.Extensions)-1],
+		Extension{0xca34, bytes.Repeat([]byte{marker}, 200+build*8)}, last)
+	return h.Marshal()
+}
+
 func TestHarvesterAcceptsAndPersists(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sub", "device.hex")
 	hv := NewHarvester(path, 0)
@@ -320,6 +337,117 @@ func TestHarvesterKeepsOneBuild(t *testing.T) {
 	}
 }
 
+func otherBuildHello(t *testing.T, marker byte) []byte {
+	t.Helper()
+	other, err := ParseClientHello(tappedVariant(t, "new.example", marker))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, e := range other.Extensions {
+		if e.Type == ExtServerPadding {
+			other.Extensions = append(other.Extensions[:i:i], other.Extensions[i+1:]...)
+			break
+		}
+	}
+	return other.Marshal()
+}
+
+func thirdBuildHello(t *testing.T, marker byte) []byte {
+	t.Helper()
+	third, err := ParseClientHello(otherBuildHello(t, marker))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, e := range third.Extensions {
+		if e.Type == ExtSupportedVersions {
+			third.Extensions = append(third.Extensions[:i:i], third.Extensions[i+1:]...)
+			return third.Marshal()
+		}
+	}
+	t.Fatal("test hello has no supported_versions extension")
+	return nil
+}
+
+// After two old-build hellos, Offer used to reject every new-build sample
+// because each was a 1-vs-2 minority. Ten new-build offers then accepted 0.
+func TestHarvesterNewBuildCanTakeOver(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "device.hex")
+	hv := NewHarvester(path, 0)
+
+	for _, m := range []byte{1, 2} {
+		if ok, err := hv.Offer(tappedVariant(t, "a.example", m)); err != nil || !ok {
+			t.Fatalf("seed old build %d: ok=%v err=%v", m, ok, err)
+		}
+	}
+	if hv.Len() != 2 {
+		t.Fatalf("seeded %d, want 2", hv.Len())
+	}
+
+	accepted := 0
+	for m := byte(1); m <= 10; m++ {
+		ok, err := hv.Offer(otherBuildHello(t, m))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok {
+			accepted++
+		}
+	}
+	if accepted == 0 {
+		t.Fatal("new-build hellos were all rejected; the new build can never become the majority")
+	}
+	stored, _ := readPoolFile(path)
+	if err := Coherent(stored); err != nil {
+		t.Fatalf("after takeover the pool mixes builds: %v", err)
+	}
+	h, err := ParseClientHello(stored[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.Find(ExtServerPadding) != nil {
+		t.Fatal("emit pool is still the old build")
+	}
+}
+
+func TestHarvesterPromotesOnePendingBuild(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "device.hex")
+	hv := NewHarvester(path, 0)
+	for _, marker := range []byte{1, 2} {
+		if ok, err := hv.Offer(tappedVariant(t, "a.example", marker)); err != nil || !ok {
+			t.Fatalf("seed active build %d: ok=%v err=%v", marker, ok, err)
+		}
+	}
+
+	for _, offer := range []struct {
+		record []byte
+		want   bool
+	}{
+		{otherBuildHello(t, 1), false},
+		{thirdBuildHello(t, 1), false},
+		{otherBuildHello(t, 2), false},
+		{otherBuildHello(t, 3), true},
+	} {
+		ok, err := hv.Offer(offer.record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok != offer.want {
+			t.Fatalf("Offer returned %v, want %v", ok, offer.want)
+		}
+	}
+
+	stored, errs := readPoolFile(path)
+	if len(errs) != 0 {
+		t.Fatalf("read promoted pool: %v", errs)
+	}
+	if len(stored) != 3 {
+		t.Fatalf("promoted pool has %d records, want 3 from the winning build", len(stored))
+	}
+	if err := Coherent(stored); err != nil {
+		t.Fatalf("promoted pool mixes pending builds: %v", err)
+	}
+}
+
 func TestHarvesterHonoursMaxAndReloads(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "device.hex")
 	hv := NewHarvester(path, 3)
@@ -416,5 +544,94 @@ func TestHarvestedPoolSurvivesTwiddle(t *testing.T) {
 	// The record must still be self-consistent after every length cascade.
 	if n := int(binary.BigEndian.Uint16(wire[3:5])); len(wire) != 5+n {
 		t.Errorf("record length %d does not match %d bytes", n, len(wire)-5)
+	}
+}
+
+// The pending set must be bounded.
+//
+// The leak needs MANY DISTINCT minority builds, not two: with only two, one of
+// them reaches pool+1 samples, gets promoted, and promotion clears pending --
+// which masks the bug. A stream of builds that each stay below the promotion
+// threshold never clears anything, and promotion was the only code that did.
+// Offer runs on the connection path, so that is a per-connection leak.
+func TestHarvesterBoundsPendingRetention(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "device.hex")
+	hv := NewHarvester(path, 4)
+
+	// Fill the emit pool with one build so everything later is a minority.
+	for i := 0; i < 4; i++ {
+		if ok, err := hv.Offer(tappedVariant(t, "a.example", byte(i))); err != nil || !ok {
+			t.Fatalf("seed %d: ok=%v err=%v", i, ok, err)
+		}
+	}
+	if hv.Len() != 4 {
+		t.Fatalf("emit pool holds %d, want 4", hv.Len())
+	}
+
+	// 150 different builds, one sample each. None can reach the 5 needed to
+	// outnumber the pool, so none is ever promoted.
+	const offers = 150
+	for i := 0; i < offers; i++ {
+		if ok, err := hv.Offer(otherBuildVariant(t, "b.example", 0x01, i+1)); err != nil {
+			t.Fatal(err)
+		} else if ok {
+			t.Fatalf("offer %d was promoted; the test no longer exercises the leak", i)
+		}
+	}
+
+	hv.mu.Lock()
+	pending, keys, budget := len(hv.pending), len(hv.pendingKeys), hv.pendingBudget()
+	hv.mu.Unlock()
+
+	if pending > budget {
+		t.Errorf("pending holds %d samples after %d minority offers, over its budget of %d",
+			pending, offers, budget)
+	}
+	if keys > budget {
+		t.Errorf("pendingKeys holds %d entries, over its budget of %d", keys, budget)
+	}
+	if hv.Len() != 4 {
+		t.Errorf("emit pool changed to %d; no minority outnumbered it", hv.Len())
+	}
+	t.Logf("%d distinct minority builds left pending at %d/%d", offers, pending, budget)
+}
+
+// Bounding pending must not defeat what it bounds: a build that really does
+// overtake the pool still has to be promotable.
+func TestHarvesterBoundStillAllowsPromotion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "device.hex")
+	hv := NewHarvester(path, 4)
+
+	for i := 0; i < 2; i++ {
+		if ok, _ := hv.Offer(tappedVariant(t, "a.example", byte(i))); !ok {
+			t.Fatalf("seed %d rejected", i)
+		}
+	}
+
+	// Feed one competing build until it outnumbers the 2-hello pool.
+	promoted := false
+	for i := 0; i < 40 && !promoted; i++ {
+		ok, err := hv.Offer(otherBuildVariant(t, "b.example", byte(i), 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		promoted = ok
+	}
+	if !promoted {
+		t.Fatal("a build that outnumbered the pool was never promoted; the bound starved it")
+	}
+
+	stored, errs := readPoolFile(path)
+	if len(errs) != 0 {
+		t.Fatalf("errs: %v", errs)
+	}
+	if err := Coherent(stored); err != nil {
+		t.Errorf("promoted pool mixes builds: %v", err)
+	}
+	hv.mu.Lock()
+	pending := len(hv.pending)
+	hv.mu.Unlock()
+	if pending != 0 {
+		t.Errorf("promotion left %d pending samples; it should clear them", pending)
 	}
 }

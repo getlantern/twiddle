@@ -39,6 +39,15 @@ const (
 	contentAppData   = 0x17
 	contentAlert     = 0x15
 	contentHandshake = 0x16
+
+	alertWarning     = 0x01
+	alertCloseNotify = 0x00
+
+	// closeNotifyWire is what a real endpoint puts on the wire at teardown:
+	// 5-byte header + 2-byte alert + 1 inner content type + 16-byte AEAD tag.
+	// Measured at exactly 24 B from all three covers, in both AES-128-GCM and
+	// AES-256-GCM (harvest/testdata/postflight-resumed.log).
+	closeNotifyWire = 24
 )
 
 // Keys is one direction's traffic secret material.
@@ -113,6 +122,10 @@ type Conn struct {
 	wbuf     []byte
 	flushing bool
 	werr     error
+
+	// closeOnce guards the close_notify alert: Close may be called more than
+	// once, and a second alert would itself be the anomaly.
+	closeOnce sync.Once
 
 	rmu     sync.Mutex
 	recv    cipher.AEAD
@@ -221,6 +234,61 @@ func (c *Conn) writeRecord(typ byte, payload []byte, padTo int) error {
 	return err
 }
 
+// writeSized emits one application_data record of exactly wireLen bytes,
+// bypassing the browsing shaper. The opening EncryptedExtensions/Finished
+// stand-ins have to hit the measured remainder (64 or 106 B), not a 1395-byte
+// browsing mode.
+func (c *Conn) writeSized(typ byte, payload []byte, wireLen int) error {
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	padTo := wireLen - recordHeaderLen - c.send.Overhead()
+	if padTo < len(payload)+1 {
+		return fmt.Errorf("twiddle: wire length %d too small for %d-byte payload", wireLen, len(payload))
+	}
+	if padTo > maxInner {
+		return fmt.Errorf("twiddle: wire length %d exceeds max inner", wireLen)
+	}
+	return c.writeRecord(typ, payload, padTo)
+}
+
+// consumeRecord decrypts the next record and returns its inner content type
+// and payload, without queuing application data. Handshake-shaped opening
+// records are consumed this way so they never mix with tunnel bytes.
+func (c *Conn) consumeRecord() (typ byte, payload []byte, err error) {
+	c.rmu.Lock()
+	defer c.rmu.Unlock()
+	return c.decryptRecord()
+}
+
+func (c *Conn) decryptRecord() (byte, []byte, error) {
+	var hdr [recordHeaderLen]byte
+	if _, err := io.ReadFull(c.raw, hdr[:]); err != nil {
+		return 0, nil, err
+	}
+	n := int(binary.BigEndian.Uint16(hdr[3:5]))
+	if n > maxCiphertext || n < c.recv.Overhead() {
+		return 0, nil, fmt.Errorf("twiddle: implausible record length %d", n)
+	}
+	buf := make([]byte, n)
+	if _, err := io.ReadFull(c.raw, buf); err != nil {
+		return 0, nil, err
+	}
+	inner, err := c.recv.Open(buf[:0], nonceFor(c.recvIV, c.recvSeq), buf, hdr[:])
+	if err != nil {
+		return 0, nil, errors.New("twiddle: record failed to decrypt")
+	}
+	c.recvSeq++
+
+	i := len(inner) - 1
+	for i >= 0 && inner[i] == 0 {
+		i--
+	}
+	if i < 0 {
+		return 0, nil, errors.New("twiddle: record has no content type")
+	}
+	return inner[i], inner[:i], nil
+}
+
 func (c *Conn) Read(b []byte) (int, error) {
 	c.rmu.Lock()
 	defer c.rmu.Unlock()
@@ -241,35 +309,13 @@ func (c *Conn) Read(b []byte) (int, error) {
 }
 
 func (c *Conn) readRecord() error {
-	var hdr [recordHeaderLen]byte
-	if _, err := io.ReadFull(c.raw, hdr[:]); err != nil {
-		return err
-	}
-	n := int(binary.BigEndian.Uint16(hdr[3:5]))
-	if n > maxCiphertext || n < c.recv.Overhead() {
-		return fmt.Errorf("twiddle: implausible record length %d", n)
-	}
-	buf := make([]byte, n)
-	if _, err := io.ReadFull(c.raw, buf); err != nil {
-		return err
-	}
-	inner, err := c.recv.Open(buf[:0], nonceFor(c.recvIV, c.recvSeq), buf, hdr[:])
+	typ, payload, err := c.decryptRecord()
 	if err != nil {
-		return errors.New("twiddle: record failed to decrypt")
+		return err
 	}
-	c.recvSeq++
-
-	// strip zero padding, then the content type -- TLS 1.3's own layout
-	i := len(inner) - 1
-	for i >= 0 && inner[i] == 0 {
-		i--
-	}
-	if i < 0 {
-		return errors.New("twiddle: record has no content type")
-	}
-	switch inner[i] {
+	switch typ {
 	case contentAppData:
-		c.pending = append(c.pending, inner[:i]...)
+		c.pending = append(c.pending, payload...)
 	case contentAlert:
 		return io.EOF
 	default:
@@ -278,7 +324,24 @@ func (c *Conn) readRecord() error {
 	return nil
 }
 
-func (c *Conn) Close() error                       { return c.raw.Close() }
+// Close sends close_notify, then closes the socket.
+//
+// Every real TLS 1.3 endpoint measured emits exactly one 24-byte alert record
+// at teardown. Closing bare put a sequence on the wire that no TLS endpoint
+// produces, on the LAST record of the connection -- which is as cheap for an
+// observer to watch as the first, and was the only record of ours that was
+// unconditionally wrong.
+//
+// Best-effort: if the peer is already gone the write fails, and that is not a
+// reason to fail Close. Once only, because Close may be called twice and a
+// second alert would itself be the anomaly.
+func (c *Conn) Close() error {
+	c.closeOnce.Do(func() {
+		_ = c.writeSized(contentAlert, []byte{alertWarning, alertCloseNotify}, closeNotifyWire)
+	})
+	return c.raw.Close()
+}
+
 func (c *Conn) LocalAddr() net.Addr                { return c.raw.LocalAddr() }
 func (c *Conn) RemoteAddr() net.Addr               { return c.raw.RemoteAddr() }
 func (c *Conn) SetDeadline(t time.Time) error      { return c.raw.SetDeadline(t) }

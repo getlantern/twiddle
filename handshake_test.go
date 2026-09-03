@@ -19,11 +19,21 @@ func pool(t *testing.T) [][]byte {
 	return out
 }
 
+func mustCover(t *testing.T, host string) CoverProfile {
+	t.Helper()
+	p, err := CoverFor(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 // TestEndToEndOverSocket is the Phase 0 goal: a client and server complete the
 // opening over a real socket and pass bytes through the record layer.
 func TestEndToEndOverSocket(t *testing.T) {
 	k := ticketKey(t)
-	cred, err := k.Issue(99, DefaultTicketLen)
+	cover := mustCover(t, "www.microsoft.com")
+	cred, err := k.Issue(99, cover.TicketLen)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +54,10 @@ func TestEndToEndOverSocket(t *testing.T) {
 			srvCh <- result{nil, err}
 			return
 		}
-		sc, err := Server(c, ServerConfig{TicketKey: k, MaxAge: time.Hour})
+		sc, err := Server(c, ServerConfig{
+			TicketKey: k, Cover: cover,
+			MaxAge: time.Hour, Replay: NewReplayCache(16, time.Hour),
+		})
 		srvCh <- result{sc, err}
 	}()
 
@@ -53,7 +66,7 @@ func TestEndToEndOverSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	cc, next, err := Client(raw, ClientConfig{
-		Pool: pool(t), CoverSNI: "www.microsoft.com", Credential: cred,
+		Pool: pool(t), Cover: cover, Credential: cred,
 	})
 	if err != nil {
 		t.Fatalf("client: %v", err)
@@ -92,18 +105,40 @@ func TestEndToEndOverSocket(t *testing.T) {
 func TestServerRejectsUnauthenticated(t *testing.T) {
 	k := ticketKey(t)
 	other := ticketKey(t)
-	badCred, _ := other.Issue(1, DefaultTicketLen)
+	cover := mustCover(t, "www.microsoft.com")
+	badCred, _ := other.Issue(1, cover.TicketLen)
 
-	cases := map[string]func(net.Conn){
-		"garbage":        func(c net.Conn) { c.Write([]byte("not a tls record at all")) },
-		"bare TLS hello": func(c net.Conn) { c.Write(pool(t)[0]) },
-		"wrong ticket key": func(c net.Conn) {
-			w, _, _ := Twiddle(pool(t)[0], Options{Credential: badCred, BinderLen: 32})
-			c.Write(w)
+	// Each case returns its write error. Swallowing it let a case "pass" on a
+	// failed write: Server sees EOF, returns ErrNotOurs, and the assertion holds
+	// without the case's input ever reaching the wire.
+	cases := map[string]func(net.Conn) error{
+		"garbage": func(c net.Conn) error {
+			_, err := c.Write([]byte("not a tls record at all"))
+			return err
 		},
-		"truncated": func(c net.Conn) {
-			w, _, _ := Twiddle(pool(t)[0], Options{Credential: badCred, BinderLen: 32})
-			c.Write(w[:40])
+		"bare TLS hello": func(c net.Conn) error {
+			_, err := c.Write(pool(t)[0])
+			return err
+		},
+		"wrong ticket key": func(c net.Conn) error {
+			w, _, err := Twiddle(pool(t)[0], Options{
+				CoverSNI: cover.Host, Credential: badCred, BinderLen: cover.BinderLen,
+			})
+			if err != nil {
+				return err
+			}
+			_, err = c.Write(w)
+			return err
+		},
+		"truncated": func(c net.Conn) error {
+			w, _, err := Twiddle(pool(t)[0], Options{
+				CoverSNI: cover.Host, Credential: badCred, BinderLen: cover.BinderLen,
+			})
+			if err != nil {
+				return err
+			}
+			_, err = c.Write(w[:40])
+			return err
 		},
 	}
 	for name, send := range cases {
@@ -118,14 +153,19 @@ func TestServerRejectsUnauthenticated(t *testing.T) {
 					return
 				}
 				c.SetReadDeadline(time.Now().Add(3 * time.Second))
-				_, err = Server(c, ServerConfig{TicketKey: k, MaxAge: time.Hour})
+				_, err = Server(c, ServerConfig{
+					TicketKey: k, Cover: cover,
+					MaxAge: time.Hour, Replay: NewReplayCache(16, time.Hour),
+				})
 				errCh <- err
 			}()
 			c, err := net.Dial("tcp", ln.Addr().String())
 			if err != nil {
 				t.Fatal(err)
 			}
-			send(c)
+			if err := send(c); err != nil {
+				t.Fatalf("case input never reached the wire: %v", err)
+			}
 			if err := <-errCh; err != ErrNotOurs {
 				t.Fatalf("got %v, want ErrNotOurs", err)
 			}
@@ -137,7 +177,8 @@ func TestServerRejectsUnauthenticated(t *testing.T) {
 // TestOpeningLooksLikeTLS checks the bytes a censor actually sees.
 func TestOpeningLooksLikeTLS(t *testing.T) {
 	k := ticketKey(t)
-	cred, _ := k.Issue(1, DefaultTicketLen)
+	cover := mustCover(t, "www.microsoft.com")
+	cred, _ := k.Issue(1, cover.TicketLen)
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
 	defer ln.Close()
 
@@ -158,7 +199,7 @@ func TestOpeningLooksLikeTLS(t *testing.T) {
 		captured <- seen
 	}()
 	raw, _ := net.Dial("tcp", ln.Addr().String())
-	go Client(raw, ClientConfig{Pool: pool(t), CoverSNI: "www.microsoft.com", Credential: cred})
+	go Client(raw, ClientConfig{Pool: pool(t), Cover: cover, Credential: cred})
 	first := <-captured
 
 	if len(first) < 5 {
@@ -320,4 +361,41 @@ func serverHelloExtOrder(t *testing.T, sh []byte) []uint16 {
 		p += 4 + int(binary.BigEndian.Uint16(b[p+2:p+4]))
 	}
 	return out
+}
+
+// writeTickets emits contentHandshake and nothing else. Accepting
+// application_data would widen what can be mistaken for a rotated credential:
+// after the opening the tunnel carries app-data records, so a lenient check
+// would parse the first of them as a ticket instead of failing.
+func TestReadTicketsRejectsNonHandshakeRecords(t *testing.T) {
+	cover := mustCover(t, "www.microsoft.com")
+	sess, err := DeriveSession(make([]byte, 32), make([]byte, 32), cover.CipherSuite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	wSess, err := DeriveSession(make([]byte, 32), make([]byte, 32), cover.CipherSuite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := NewConn(server, wSess, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewConn(client, sess, true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A well-formed credential body, but sent as application_data.
+	body := make([]byte, 2+16+32)
+	body[1] = 16
+	go func() { _ = w.writeSized(contentAppData, body, sessionTicketWire) }()
+
+	if _, err := readTickets(r); err == nil {
+		t.Error("readTickets accepted an application_data record as a rotated credential")
+	}
 }

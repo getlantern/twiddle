@@ -107,7 +107,8 @@ func TestShaperNeverLosesBytes(t *testing.T) {
 // the record lengths a censor would see.
 func TestShapedWireLengths(t *testing.T) {
 	k := ticketKey(t)
-	cred, _ := k.Issue(1, DefaultTicketLen)
+	cover := mustCover(t, "www.cloudflare.com")
+	cred, _ := k.Issue(1, cover.TicketLen)
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
 	defer ln.Close()
 
@@ -118,7 +119,10 @@ func TestShapedWireLengths(t *testing.T) {
 			srv <- nil
 			return
 		}
-		sc, err := Server(c, ServerConfig{TicketKey: k, Shaper: BrowsingShaper(true)})
+		sc, err := Server(c, ServerConfig{
+			TicketKey: k, Cover: cover, Replay: NewReplayCache(0, 0),
+			Shaper: BrowsingShaper(true),
+		})
 		if err != nil {
 			srv <- nil
 			return
@@ -126,14 +130,18 @@ func TestShapedWireLengths(t *testing.T) {
 		srv <- sc
 	}()
 	raw, _ := net.Dial("tcp", ln.Addr().String())
-	cc, _, err := Client(raw, ClientConfig{Pool: pool(t), Credential: cred, Shaper: BrowsingShaper(false)})
+	cc, _, err := Client(raw, ClientConfig{
+		Pool: pool(t), Cover: cover, Credential: cred, Shaper: BrowsingShaper(false),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer cc.Close()
 	sc := <-srv
 	if sc == nil {
 		t.Fatal("server side failed")
 	}
+	defer sc.Close()
 
 	lens := make(chan int, 256)
 	go func() {
@@ -151,8 +159,6 @@ func TestShapedWireLengths(t *testing.T) {
 			lens <- n
 		}
 	}()
-	_ = cc
-
 	payload := make([]byte, 4000) // an MTU-ish response: the case that broke before
 	rand.Read(payload)
 	if _, err := sc.Write(payload); err != nil {

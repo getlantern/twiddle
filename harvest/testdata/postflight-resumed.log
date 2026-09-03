@@ -1,0 +1,136 @@
+Post-handshake and teardown record profile, resumed TLS 1.3.
+
+  tool     cmd/postflight
+  client   Go crypto/tls (MinVersion 1.3), NOT a browser -- see the caveat below
+  date     2026-09-03
+  method   full handshake to bank a ticket, reconnect resumed, then hold a
+           700ms QUIET READ WINDOW sending nothing, so anything the server
+           emits is post-handshake handshake traffic rather than a response.
+           Then close cleanly and record what each side puts on the wire.
+
+Post-handshake records are all outer type 0x17 in TLS 1.3, so what is reported
+is what an observer can actually use: direction, outer type, length, timing.
+
+
+www.cloudflare.com  (resumed, version 304 cipher 1301)
+  opening (6 records):
+    C handshake 1711 B @ 2.6ms
+    S handshake 1221 B @ 12.9ms
+    S ccs       6 B @ 12.9ms
+    S appdata   64 B @ 12.9ms
+    C ccs       6 B @ 13.1ms
+    C appdata   58 B @ 13.1ms
+  quiet window, nothing requested (0 records) <- NewSessionTicket lives here:
+    => server sent 0 record(s) unprompted, sizes []
+  teardown (1 records), close err=<nil>:
+    C appdata   24 B @ 714.2ms
+    => client emitted [24] at close, server []
+
+www.google.com  (resumed, version 304 cipher 1301)
+  opening (6 records):
+    C handshake 1761 B @ 1.7ms
+    S handshake 1221 B @ 12.0ms
+    S ccs       6 B @ 12.0ms
+    S appdata   64 B @ 12.0ms
+    C ccs       6 B @ 12.2ms
+    C appdata   58 B @ 12.2ms
+  quiet window, nothing requested (0 records) <- NewSessionTicket lives here:
+    => server sent 0 record(s) unprompted, sizes []
+  teardown (1 records), close err=<nil>:
+    C appdata   24 B @ 713.4ms
+    => client emitted [24] at close, server []
+
+www.microsoft.com  (resumed, version 304 cipher 1302)
+  opening (7 records):
+    C handshake 1806 B @ 2.0ms
+    S handshake 1221 B @ 11.7ms
+    S ccs       6 B @ 11.7ms
+    S appdata   32 B @ 11.7ms
+    S appdata   74 B @ 11.7ms
+    C ccs       6 B @ 11.8ms
+    C appdata   74 B @ 11.8ms
+  quiet window, nothing requested (1 records) <- NewSessionTicket lives here:
+    S appdata   303 B @ 21.5ms
+    => server sent 1 record(s) unprompted, sizes [303]
+  teardown (1 records), close err=<nil>:
+    C appdata   24 B @ 713.0ms
+    => client emitted [24] at close, server []
+
+
+Findings
+------------------------------------------------------------------------------
+
+1. THE SERVER OPENING BURST TOTALS CONFIRM cover.go, BUT MICROSOFT'S RECORD
+   BOUNDARIES DO NOT.
+
+     cloudflare   S 1221, 6, 64            = 1291   3 records
+     google       S 1221, 6, 64            = 1291   3 records
+     microsoft    S 1221, 6, 32, 74        = 1333   4 records
+
+   ServerHelloResumedLen (1221), ChangeCipherSpec (6) and both ServerOpeningBurst
+   totals (1291 / 1333) match exactly. But microsoft's encrypted remainder of
+   106 B arrives as TWO records, 32 then 74.
+
+   twiddle emits it as ONE: handshake.go writes
+   writeSized(contentHandshake, nil, Cover.ServerEncryptedWire()) with
+   ServerEncryptedWire() = ServerOpeningBurst - 1221 - 6 = 106. So against a
+   microsoft cover we put 3 server records on the wire where the real identity
+   puts 4, with the same byte total. The total is what CoverProfile models; the
+   sequence is what an observer counts. cloudflare and google match at 3.
+
+   CoverProfile needs the remainder as a record SEQUENCE, not a single int.
+
+2. NewSessionTicket IS NOT SENT AT ALL ON A RESUMED CONNECTION BY TWO OF THE
+   THREE COVERS.
+
+     cloudflare   0 records unprompted
+     google       0 records unprompted
+     microsoft    1 record, 303 B, at 21.5ms
+
+   twiddle sends one record of sessionTicketWire = 370 on every connection. For
+   a cloudflare or google cover that record has no counterpart in the real
+   identity's behaviour -- it is not a size mismatch, it is a record the real
+   server does not send. For microsoft the size is wrong: 370 against a
+   measured 303.
+
+   Caveat worth keeping: this measures UNPROMPTED traffic in a 700ms window. A
+   server could issue tickets later, or only after application data. Microsoft's
+   arrived at 21.5ms, so the window is not obviously too short, but a variant
+   that sends a request first would firm this up.
+
+3. A REAL TLS 1.3 CLIENT SENDS A 24-BYTE close_notify. twiddle SENDS NOTHING.
+
+   All three teardowns show the client emitting exactly one 24 B record at
+   close: 5 header + 2 alert + 16 AEAD tag + 1 inner content type. twiddle's
+   Conn.Close() is `return c.raw.Close()` -- a bare FIN, no alert.
+
+   So every twiddle connection ends with a record sequence no TLS endpoint
+   produces, on the LAST record of the connection, which is as cheap for an
+   observer to watch as the first. This was a hypothesis before this run; the
+   24 B figure is now measured.
+
+   The servers emitted nothing at teardown here, but that is an artefact: we
+   close first and stop reading 150ms later, so a server close_notify would
+   often not be captured. Server-side teardown is still unmeasured.
+
+CAVEAT ON THE CLIENT SIDE -- DO NOT USE THIS RUN TO REVISE ClientFlight
+------------------------------------------------------------------------------
+This probe is Go's crypto/tls, not Chrome. Its client records here are
+
+     cloudflare   C 6, 58   = 64
+     google       C 6, 58   = 64
+     microsoft    C 6, 74   = 80
+
+against cover.go's ClientFlight of 149 / 145 / 164, which came from Chrome
+captures (harvest/testdata/tls13-burst-resumption.log). The gap is the client,
+not the model: Go's opening hello is also 1711/1761/1806 here versus Chrome's
+1715 in the burst log. Go is a valid probe for what the SERVER does, because
+the server's profile follows the negotiated parameters. It is the wrong
+reference for what the CLIENT emits, so 149/145/164 stand and the client-side
+record split remains unmeasured -- that needs a Chrome capture via
+cmd/records or cmd/capture.
+
+Reproduce:
+
+  go run ./cmd/postflight
+  go run ./cmd/postflight -hosts www.microsoft.com -quiet 2s

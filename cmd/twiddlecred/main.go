@@ -14,18 +14,31 @@ import (
 
 func main() {
 	clientID := flag.Uint64("client-id", 1, "client identifier embedded in the ticket")
-	ticketLen := flag.Int("ticket-len", twiddle.DefaultTicketLen, "ticket length; should match the cover identity's real server")
-	cover := flag.String("cover", "", "cover host; sets ticket-len from measured values when given")
+	cover := flag.String("cover", "", "measured cover host (required)")
+	printPool := flag.Bool("print-pool", false, "write a usable hello pool to stdout (embedded snapshot; tests only)")
 	flag.Parse()
 
-	if *cover != "" {
-		*ticketLen = twiddle.TicketLenForCover(*cover)
+	if *printPool {
+		p, err := twiddle.LoadPool(twiddle.Sources{AllowEmbedded: true})
+		if err != nil {
+			panic(err)
+		}
+		fmt.Print(twiddle.FormatPool(p.Hellos))
+		return
+	}
+
+	if *cover == "" {
+		panic("twiddlecred: -cover is required")
+	}
+	profile, err := twiddle.CoverFor(*cover)
+	if err != nil {
+		panic(err)
 	}
 	k, err := twiddle.NewTicketKey()
 	if err != nil {
 		panic(err)
 	}
-	cred, err := k.Issue(*clientID, *ticketLen)
+	cred, err := k.Issue(*clientID, profile.TicketLen)
 	if err != nil {
 		panic(err)
 	}

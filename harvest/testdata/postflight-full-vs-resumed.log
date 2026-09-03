@@ -1,0 +1,122 @@
+Full and resumed opening profiles, measured together.
+
+  tool     cmd/postflight -quiet 1s
+  client   Go crypto/tls (MinVersion 1.3), NOT a browser -- see the caveat
+  date     2026-09-03
+  method   one run per host does a full handshake and then a resumed one against
+           the same server, so the two profiles are directly comparable. After
+           each handshake, a QUIET READ WINDOW sends nothing, so anything the
+           server emits is post-handshake handshake traffic rather than a
+           response. The full run banks its ticket with a request sent AFTER
+           that window closes, so the unprompted count is uncontaminated.
+
+Why the full handshake is the interesting one: resumption-ratio-session.log
+measured a 4.1% resumption share across 636 real browsing connections (2.7% in
+resumption-ratio-cold-perprocess.log). twiddle emits 100% resumption hellos, so
+it sits permanently in the rare bucket. The full-handshake carrier the README
+describes -- ClientHello.random carrying the MAC, key_share supplying the
+ephemeral -- is what would let it emit the common shape, and this is the server
+profile that carrier would have to reproduce.
+
+SERVER OPENING
+------------------------------------------------------------------------------
+                  ServerHello  ccs  encrypted remainder            burst
+  FULL
+    cloudflare       1215       6   [3848]                          5069
+    google           1215       6   [3921]                          5142
+    microsoft        1215       6   [32, 8273, 286, 74]             9886
+  RESUMED
+    cloudflare       1221       6   [64]                            1291
+    google           1221       6   [64]                            1291
+    microsoft        1221       6   [32, 74]                        1333
+
+POST-HANDSHAKE, UNPROMPTED (NewSessionTicket)
+------------------------------------------------------------------------------
+                  full            resumed
+    cloudflare    none            none
+    google        none            none
+    microsoft     303, 303        303
+
+TEARDOWN
+------------------------------------------------------------------------------
+    client emits exactly one 24 B close_notify on all six connections.
+
+Findings
+------------------------------------------------------------------------------
+
+1. ServerHello is 1215 full, 1221 resumed, on every host. The 6-byte delta is
+   pre_shared_key, exactly as serverhello.go's comment says. A full-handshake
+   carrier needs its own ServerHello length; it cannot reuse 1221.
+
+2. THE FULL REMAINDER IS THE CERTIFICATE, AND IT IS BIG. 3848 / 3921 / 8273
+   bytes against 64 / 64 / 106 resumed. A faithful full handshake therefore
+   costs 5-10 KB of opening overhead per connection instead of ~1.3 KB. That is
+   the price of emitting the shape 96% of the population has, and it should be
+   priced deliberately rather than discovered later.
+
+3. THE FULL REMAINDER CANNOT BE A TABLE CONSTANT. Two reasons, both measured:
+
+   - It moves run to run. Across three runs: cloudflare 3847, 3848, 3848;
+     google 3920, 3921, 3921; microsoft 8273, 8273, 8273. The +/-1 B on the two
+     ECDSA hosts is consistent with the DER-encoded signature in
+     CertificateVerify varying in length; microsoft's RSA signature is fixed, so
+     it does not move. An emitter that sends a constant where the real server
+     jitters is distinguishable over enough connections.
+   - It changes whenever the certificate chain does -- rotation every 60-90 days
+     for most issuers, and immediately on any reissue.
+
+   So the full-handshake profile has to come from the coverprobe, not from
+   cover.go. For this path the dynamic probe is a prerequisite, not an
+   optimisation.
+
+4. The record SPLIT differs by server the same way it does when resumed:
+   microsoft sends EncryptedExtensions(32), Certificate(8273),
+   CertificateVerify(286), Finished(74) as four records; cloudflare and google
+   coalesce all four into one. ServerRemainder []int already models this.
+
+5. TICKET ISSUANCE IS NOT UNIFORM, and it explains an earlier result.
+   cloudflare and google issue NOTHING unprompted, on either handshake -- they
+   wait for application data. Microsoft issues two 303 B tickets after a full
+   handshake and one after a resumed one.
+
+   This was found the hard way: removing the request from the full run left
+   cloudflare and google with no ticket to resume with, and the resumed
+   measurement failed outright. That failure is the finding.
+
+   For sessionTicketWire = 370, sent once on every connection: the size is wrong
+   for microsoft (303) and the record has no counterpart at all on a cloudflare
+   or google connection that has not carried application data.
+
+CAVEAT -- CLIENT SIDE
+------------------------------------------------------------------------------
+This probe is Go's crypto/tls. Its client flights here are 6+58 (cloudflare,
+google) and 6+74 (microsoft) on both handshake types, against cover.go's
+ClientFlight of 149/145/164 from Chrome captures. The gap is the probe, not the
+model. Go is a valid reference for what the SERVER does -- its resumed numbers
+reproduce the Chrome-derived table exactly -- and the wrong one for the client.
+Anything client-side still needs a Chrome capture.
+
+Reproduce:
+
+  go run ./cmd/postflight -quiet 1s
+  go run ./cmd/postflight -hosts www.microsoft.com -quiet 2s
+
+ADDENDUM: the jitter, sampled
+------------------------------------------------------------------------------
+  tool   coverprobe.SampleFull, 5 samples per host, 2026-09-03
+
+    www.cloudflare.com   baseline [3846]             jitter [1]
+    www.google.com       baseline [3920]             jitter [1]
+    www.microsoft.com    baseline [32 8273 286 74]   jitter [0 0 0 0]
+
+Confirms the prediction from the run-to-run spread: the two ECDSA covers move,
+the RSA one does not. It is the DER-encoded signature in CertificateVerify --
+its length depends on the integers it encodes -- and microsoft's fixed-length
+RSA signature is why it holds 8273 exactly across every sample.
+
+CAVEAT ON SAMPLE COUNT. Five samples reported a jitter of 1 for cloudflare, but
+across all runs in this file its single record has been seen at 3846, 3847 AND
+3848 -- a range of 2. A small sample underestimates the range, so a profile
+built from one should treat its jitter as a floor, not the truth. Sample more
+before shipping a number, and re-sample after any certificate rotation, when
+the baseline itself moves.

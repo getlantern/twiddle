@@ -51,8 +51,9 @@ func (o Origin) String() string {
 	return "unknown"
 }
 
-// Sources names where a pool may be read from. Every field may be empty;
-// LoadPool falls through to the next source, and to the embedded pool last.
+// Sources names where a pool may be read from. LoadPool falls through from the
+// device source to config. The embedded pool is used last only when explicitly
+// enabled.
 type Sources struct {
 	// Device is the path to a pool written by whatever on this device taps
 	// outbound TLS. Entries must already be sanitised -- see Sanitize.
@@ -65,6 +66,10 @@ type Sources struct {
 	// service that delivers hellos in its JSON body and one that drops them in a
 	// file are the same tier of trust and the same staleness risk.
 	ConfigInline string
+	// AllowEmbedded enables the compiled-in Chrome snapshot. Censor-facing
+	// deployments must leave this false: the snapshot already reproduces no
+	// Chrome that exists, and falling back to it is emitting a fingerprint.
+	AllowEmbedded bool
 }
 
 // Pool is a set of harvested hellos and a record of where they came from.
@@ -77,7 +82,8 @@ type Pool struct {
 	Skipped []error
 }
 
-// LoadPool returns the best usable pool: device, else config, else embedded.
+// LoadPool returns the best usable pool: device, else config, else the embedded
+// pool when AllowEmbedded is true.
 //
 // Sources are never merged. A real browser install emits hellos from exactly
 // one build, so a pool blending a device-tapped Chrome 152 hello with a
@@ -121,6 +127,20 @@ func LoadPool(s Sources) (*Pool, error) {
 				src.origin, len(best), dropped))
 		}
 		return &Pool{Hellos: best, Origin: src.origin, Skipped: skipped}, nil
+	}
+
+	if !s.AllowEmbedded {
+		// Carry the reasons. This path is reached both when no source was
+		// configured AND when one was but every entry in it was unusable, and
+		// those want opposite fixes -- provision a pool, or find out why the
+		// pool provisioned is being rejected. Skipped holds the per-line
+		// answer, so discarding it here loses the diagnosis at exactly the
+		// moment it is needed.
+		err := fmt.Errorf("twiddle: no usable hello pool from device or config, and the embedded fallback is disabled")
+		if len(skipped) > 0 {
+			return nil, errors.Join(append([]error{err}, skipped...)...)
+		}
+		return nil, fmt.Errorf("%w (no device or config source was configured)", err)
 	}
 
 	// The embedded pool is partitioned on the same terms. It needs it: four of
