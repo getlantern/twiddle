@@ -120,7 +120,7 @@ func TestShapedWireLengths(t *testing.T) {
 			return
 		}
 		sc, err := Server(c, ServerConfig{
-			TicketKey: k, Cover: cover, Replay: NewReplayCache(8, time.Hour),
+			TicketKey: k, Cover: cover, Replay: NewReplayCache(0, 0),
 			Shaper: BrowsingShaper(true),
 		})
 		if err != nil {

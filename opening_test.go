@@ -61,7 +61,7 @@ func TestOpeningRecordSequenceMatchesCover(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			replay := NewReplayCache(8, time.Hour)
+			replay := NewReplayCache(0, 0)
 
 			ln, err := net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {
@@ -156,7 +156,7 @@ func TestReplayTakesCoverPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	replay := NewReplayCache(8, time.Hour)
+	replay := NewReplayCache(0, 0)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -312,7 +312,7 @@ func TestServerRequiresSharedReplayCache(t *testing.T) {
 func TestServerRequiresTicketKey(t *testing.T) {
 	_, err := Server(nil, ServerConfig{
 		Cover:  mustCover(t, "www.google.com"),
-		Replay: NewReplayCache(8, time.Hour),
+		Replay: NewReplayCache(0, 0),
 	})
 	if err == nil {
 		t.Fatal("server accepted a nil ticket key")

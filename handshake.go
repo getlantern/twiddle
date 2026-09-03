@@ -137,6 +137,18 @@ func Server(raw net.Conn, cfg ServerConfig) (*Conn, error) {
 	if cfg.Replay == nil {
 		return nil, errors.New("twiddle: shared replay cache is required")
 	}
+	maxAge := cfg.MaxAge
+	if maxAge <= 0 {
+		maxAge = DefaultTicketMaxAge
+	}
+	// The replay gate forgets a client once its newest ticket ages past the
+	// horizon, and that is only sound if MaxAge refuses such a ticket first.
+	// Checked rather than documented, and checked here rather than after the
+	// first read: a horizon shorter than MaxAge silently reopens the window the
+	// gate exists to close, so it should not take a peer connecting to surface.
+	if hz := cfg.Replay.Horizon(); hz < maxAge {
+		return nil, fmt.Errorf("twiddle: replay horizon %v is shorter than ticket MaxAge %v", hz, maxAge)
+	}
 	rec, err := readRecord(raw)
 	if err != nil {
 		return nil, ErrNotOurs
@@ -149,15 +161,11 @@ func Server(raw net.Conn, cfg ServerConfig) (*Conn, error) {
 	if err != nil {
 		return nil, ErrNotOurs
 	}
-	maxAge := cfg.MaxAge
-	if maxAge <= 0 {
-		maxAge = DefaultTicketMaxAge
-	}
 	res, err := VerifyTicketAuth(h, cfg.TicketKey, maxAge)
 	if err != nil {
 		return nil, ErrNotOurs
 	}
-	if !cfg.Replay.Consume(ticket) {
+	if !cfg.Replay.Consume(res.ClientID, res.Issued, ticket) {
 		return nil, ErrNotOurs
 	}
 
