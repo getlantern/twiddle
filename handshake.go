@@ -131,6 +131,9 @@ func Server(raw net.Conn, cfg ServerConfig) (*Conn, error) {
 	if err := cfg.Cover.Valid(); err != nil {
 		return nil, err
 	}
+	if cfg.TicketKey == nil {
+		return nil, errors.New("twiddle: ticket key is required")
+	}
 	if cfg.Replay == nil {
 		return nil, errors.New("twiddle: shared replay cache is required")
 	}

@@ -136,9 +136,10 @@ func (p CoverProfile) ClientEncryptedWire() int {
 	return p.ClientFlight - len(ChangeCipherSpec())
 }
 
-// TicketLenForCover returns the measured ticket length, or DefaultTicketLen
-// for an unmeasured host. Prefer CoverFor: this exists so existing callers
-// that only needed the length keep compiling.
+// TicketLenForCover returns the measured ticket length, including for a known
+// but unimpersonable host, or DefaultTicketLen for an unmeasured host. Prefer
+// CoverFor: this exists so existing callers that only needed the length keep
+// compiling.
 func TicketLenForCover(host string) int {
 	if p, err := CoverFor(host); err == nil {
 		return p.TicketLen

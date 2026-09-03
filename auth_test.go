@@ -171,6 +171,9 @@ func TestVerifyRejectsExpiredTicket(t *testing.T) {
 		if _, err := VerifyTicketAuth(back, k, 72*time.Hour); err != nil {
 			t.Fatalf("a 48h-old ticket should verify under a 72h limit: %v", err)
 		}
+		if _, err := VerifyTicketAuth(back, k, 0); err != nil {
+			t.Fatalf("a 48h-old ticket should verify with the age check disabled: %v", err)
+		}
 		break
 	}
 }

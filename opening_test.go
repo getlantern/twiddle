@@ -300,9 +300,22 @@ func TestCoverRejectsMismatchedClientHello(t *testing.T) {
 }
 
 func TestServerRequiresSharedReplayCache(t *testing.T) {
-	_, err := Server(nil, ServerConfig{Cover: mustCover(t, "www.google.com")})
+	_, err := Server(nil, ServerConfig{
+		TicketKey: ticketKey(t),
+		Cover:     mustCover(t, "www.google.com"),
+	})
 	if err == nil {
 		t.Fatal("server accepted a nil replay cache")
+	}
+}
+
+func TestServerRequiresTicketKey(t *testing.T) {
+	_, err := Server(nil, ServerConfig{
+		Cover:  mustCover(t, "www.google.com"),
+		Replay: NewReplayCache(8, time.Hour),
+	})
+	if err == nil {
+		t.Fatal("server accepted a nil ticket key")
 	}
 }
 
