@@ -108,20 +108,37 @@ func TestServerRejectsUnauthenticated(t *testing.T) {
 	cover := mustCover(t, "www.microsoft.com")
 	badCred, _ := other.Issue(1, cover.TicketLen)
 
-	cases := map[string]func(net.Conn){
-		"garbage":        func(c net.Conn) { c.Write([]byte("not a tls record at all")) },
-		"bare TLS hello": func(c net.Conn) { c.Write(pool(t)[0]) },
-		"wrong ticket key": func(c net.Conn) {
-			w, _, _ := Twiddle(pool(t)[0], Options{
-				CoverSNI: cover.Host, Credential: badCred, BinderLen: cover.BinderLen,
-			})
-			c.Write(w)
+	// Each case returns its write error. Swallowing it let a case "pass" on a
+	// failed write: Server sees EOF, returns ErrNotOurs, and the assertion holds
+	// without the case's input ever reaching the wire.
+	cases := map[string]func(net.Conn) error{
+		"garbage": func(c net.Conn) error {
+			_, err := c.Write([]byte("not a tls record at all"))
+			return err
 		},
-		"truncated": func(c net.Conn) {
-			w, _, _ := Twiddle(pool(t)[0], Options{
+		"bare TLS hello": func(c net.Conn) error {
+			_, err := c.Write(pool(t)[0])
+			return err
+		},
+		"wrong ticket key": func(c net.Conn) error {
+			w, _, err := Twiddle(pool(t)[0], Options{
 				CoverSNI: cover.Host, Credential: badCred, BinderLen: cover.BinderLen,
 			})
-			c.Write(w[:40])
+			if err != nil {
+				return err
+			}
+			_, err = c.Write(w)
+			return err
+		},
+		"truncated": func(c net.Conn) error {
+			w, _, err := Twiddle(pool(t)[0], Options{
+				CoverSNI: cover.Host, Credential: badCred, BinderLen: cover.BinderLen,
+			})
+			if err != nil {
+				return err
+			}
+			_, err = c.Write(w[:40])
+			return err
 		},
 	}
 	for name, send := range cases {
@@ -146,7 +163,9 @@ func TestServerRejectsUnauthenticated(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			send(c)
+			if err := send(c); err != nil {
+				t.Fatalf("case input never reached the wire: %v", err)
+			}
 			if err := <-errCh; err != ErrNotOurs {
 				t.Fatalf("got %v, want ErrNotOurs", err)
 			}

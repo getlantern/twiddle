@@ -145,6 +145,7 @@ func (h *Harvester) Offer(rec []byte) (bool, error) {
 	h.pendingKeys[key] = struct{}{}
 	best, _ := largestBuild(h.pending)
 	if len(best) <= len(h.hellos) {
+		h.trimPendingLocked()
 		h.mu.Unlock()
 		return false, nil
 	}
@@ -180,6 +181,55 @@ func (h *Harvester) Len() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.hellos)
+}
+
+// pendingBudget bounds the minority samples held aside.
+//
+// Promotion requires a candidate build to OUTNUMBER the emit pool, and the pool
+// itself never exceeds max, so max+1 samples of one build is the most that can
+// ever be useful -- which makes this a derived bound rather than a guess.
+//
+// Without it, pending grows forever on any device whose tap sees a second live
+// browser build that never overtakes the first: every sample dedupes as a
+// genuine contribution, none is ever promoted, and the only code that clears
+// pending is the promotion that never happens. Offer runs on the connection
+// path, so that is a leak measured in hellos per connection.
+func (h *Harvester) pendingBudget() int { return h.max + 1 }
+
+// trimPendingLocked evicts down to the budget, taking from the SMALLEST build
+// group first.
+//
+// Smallest-first is what stops the bound from defeating the mechanism it
+// bounds. The leading candidate keeps its samples and can still cross the
+// promotion threshold, while builds seen once and never again fall out. Evicting
+// the largest, or evicting purely by age, would starve exactly the build that
+// was about to be promoted.
+//
+// Ties break on the fingerprint, and the oldest sample of the chosen group goes
+// first, so eviction is deterministic: two harvesters fed the same sequence hold
+// the same pending set.
+func (h *Harvester) trimPendingLocked() {
+	for len(h.pending) > h.pendingBudget() {
+		groups := map[string][]int{}
+		for i, rec := range h.pending {
+			fp := recordBuild(rec)
+			groups[fp] = append(groups[fp], i)
+		}
+		victim := ""
+		for fp := range groups {
+			switch {
+			case victim == "",
+				len(groups[fp]) < len(groups[victim]),
+				len(groups[fp]) == len(groups[victim]) && fp < victim:
+				victim = fp
+			}
+		}
+		drop := groups[victim][0]
+		if k, ok := contributionKey(h.pending[drop]); ok {
+			delete(h.pendingKeys, k)
+		}
+		h.pending = append(h.pending[:drop:drop], h.pending[drop+1:]...)
+	}
 }
 
 func recordBuild(rec []byte) string {
