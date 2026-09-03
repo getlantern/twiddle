@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 )
 
 // CoverProfile is one impersonated identity. Every fidelity parameter that
@@ -175,4 +176,64 @@ func PSKFirstForCover(host string) bool {
 		return p.PSKFirst
 	}
 	return false
+}
+
+// ProbeResult is what one cover probe learned from the live upstream. The
+// probe itself lives in the coverprobe subpackage, which needs a TLS
+// implementation to reach a resumed handshake; this type and Adopt do not, so
+// they stay here where the profile does.
+type ProbeResult struct {
+	Host string
+	// ServerHello is the first handshake record's wire length.
+	ServerHello int
+	// Remainder is the encrypted record SEQUENCE after ServerHello and the
+	// ChangeCipherSpec -- the field a single total could not express.
+	Remainder []int
+	// OpeningBurst is ServerHello + ChangeCipherSpec + every remainder record.
+	OpeningBurst int
+	Elapsed      time.Duration
+}
+
+const (
+	// maxRemainderRecords bounds a plausible opening. Measured servers send one
+	// or two; more than a handful is not the shape this transport imitates.
+	maxRemainderRecords = 4
+	// maxBurstDrift is how far a probe may move the opening burst before it
+	// looks like a different server rather than the same one having changed.
+	// The measured spread across three covers is 42 B, 1291 to 1333.
+	maxBurstDrift = 256
+)
+
+// Adopt folds a probe into a profile and returns what the egress should emit.
+//
+// Only what the probe actually measured is replaced. The resumption-derived
+// fields -- cipher, binder length, ticket length, PSK order -- come from p,
+// because they describe the handshake rather than the opening burst.
+//
+// A probe that disagrees with the known identity is REJECTED rather than
+// adopted, and rejection is the point: whatever a probe returns would otherwise
+// be emitted by every client on that egress, so a CDN edge, a captive portal or
+// a hostile upstream answering in the cover's place must not become the
+// profile. Fail closed, and let the caller decide whether to keep serving on
+// the last good profile or refuse to start.
+func (p CoverProfile) Adopt(res ProbeResult) (CoverProfile, error) {
+	if res.Host != p.Host {
+		return p, fmt.Errorf("twiddle: probe of %s cannot update the %s profile", res.Host, p.Host)
+	}
+	if res.ServerHello != ServerHelloResumedLen {
+		return p, fmt.Errorf("twiddle: probe of %s returned a %d B ServerHello, not the %d B resumed shape we synthesise",
+			res.Host, res.ServerHello, ServerHelloResumedLen)
+	}
+	if len(res.Remainder) == 0 || len(res.Remainder) > maxRemainderRecords {
+		return p, fmt.Errorf("twiddle: probe of %s returned %d remainder records, outside 1..%d",
+			res.Host, len(res.Remainder), maxRemainderRecords)
+	}
+	known := p.ServerOpeningBurst()
+	if delta := res.OpeningBurst - known; delta < -maxBurstDrift || delta > maxBurstDrift {
+		return p, fmt.Errorf("twiddle: probe of %s returned a %d B opening burst, %+d from the measured %d; not adopting",
+			res.Host, res.OpeningBurst, delta, known)
+	}
+	out := p
+	out.ServerRemainder = append([]int(nil), res.Remainder...)
+	return out, nil
 }
