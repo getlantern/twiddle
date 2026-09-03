@@ -1,5 +1,12 @@
-// postflight measures what a real TLS 1.3 server sends AFTER the handshake on a
-// resumed connection, and what both ends put on the wire at teardown.
+// postflight measures the opening, the post-handshake records and the teardown
+// of a real TLS 1.3 server, for BOTH a full and a resumed handshake.
+//
+// Both matter, and the full one matters more than it looks. Only ~4% of real
+// browsing connections are resumptions -- measured in
+// harvest/testdata/resumption-ratio-session.log, because a page load opens each
+// origin's connections in a parallel burst before any ticket exists -- so the
+// full handshake is the shape the overwhelming majority of the population
+// takes.
 //
 // Everything else in harvest stops at the opening burst. Two numbers twiddle
 // emits live past it and were never measured:
@@ -135,7 +142,7 @@ func (t *tapConn) records() []rec {
 
 func main() {
 	flag.Parse()
-	fmt.Printf("postflight: post-handshake and teardown record profile, resumed TLS 1.3\n")
+	fmt.Printf("postflight: opening, post-handshake and teardown record profile, full and resumed TLS 1.3\n")
 	fmt.Printf("quiet window %v, per-host budget %v\n\n", *quiet, *timeout)
 
 	var failures int
@@ -159,15 +166,20 @@ func measure(host string) error {
 	cache := tls.NewLRUClientSessionCache(4)
 	addr := net.JoinHostPort(host, "443")
 
-	// First connection: full handshake, purely to bank a session ticket.
-	if err := once(host, addr, cache, false); err != nil {
-		return fmt.Errorf("priming handshake: %w", err)
+	// Both handshakes are reported. The first is a FULL handshake -- the shape
+	// ~96% of real browsing connections actually take
+	// (harvest/testdata/resumption-ratio-session.log measured 4.1% resumption,
+	// because a page load opens each origin's connections in a parallel burst
+	// before any ticket exists). It also happens to bank the ticket the second
+	// connection resumes with, so one run yields both profiles from the same
+	// client against the same server, directly comparable.
+	if err := once(host, addr, cache, "full"); err != nil {
+		return fmt.Errorf("full handshake: %w", err)
 	}
-	// Second: resumed, and this is the one we report.
-	return once(host, addr, cache, true)
+	return once(host, addr, cache, "resumed")
 }
 
-func once(host, addr string, cache tls.ClientSessionCache, report bool) error {
+func once(host, addr string, cache tls.ClientSessionCache, kind string) error {
 	raw, err := net.DialTimeout("tcp", addr, *timeout)
 	if err != nil {
 		return err
@@ -185,28 +197,19 @@ func once(host, addr string, cache tls.ClientSessionCache, report bool) error {
 		return fmt.Errorf("handshake: %w", err)
 	}
 	st := tc.ConnectionState()
-	if !report {
-		// Read a little so the server's NewSessionTickets are processed and
-		// cached, then close cleanly so the ticket is usable.
-		tc.SetReadDeadline(time.Now().Add(*quiet))
-		_, _ = tc.Write([]byte("GET / HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\n\r\n"))
-		buf := make([]byte, 16<<10)
-		for {
-			if _, err := tc.Read(buf); err != nil {
-				break
-			}
-		}
-		return tc.Close()
-	}
-
-	if !st.DidResume {
+	if kind == "resumed" && !st.DidResume {
 		return fmt.Errorf("did not resume (version %x, cipher %x) — cannot measure the resumed profile",
 			st.Version, st.CipherSuite)
+	}
+	if kind == "full" && st.DidResume {
+		return fmt.Errorf("resumed on the first connection; the full profile would be wrong")
 	}
 	handshakeDone := len(tap.records())
 
 	// Quiet window: request nothing. Anything arriving is post-handshake
-	// handshake traffic, i.e. NewSessionTicket.
+	// handshake traffic, i.e. NewSessionTicket. This is where the full and
+	// resumed profiles differ most: a server that issues tickets does it here,
+	// on the connection that had no ticket to begin with.
 	tc.SetReadDeadline(time.Now().Add(*quiet))
 	buf := make([]byte, 16<<10)
 	for {
@@ -216,6 +219,25 @@ func once(host, addr string, cache tls.ClientSessionCache, report bool) error {
 	}
 	afterQuiet := tap.records()
 
+	// On the full handshake, bank a ticket for the resumed run. This happens
+	// AFTER the quiet window is captured, so it cannot contaminate the
+	// unprompted count -- which is the point, because cloudflare and google
+	// issue no ticket until application data has flowed, and without one there
+	// is nothing to resume.
+	if kind == "full" {
+		_ = tc.SetReadDeadline(time.Now().Add(*quiet))
+		_, _ = tc.Write([]byte("GET / HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\n\r\n"))
+		drain := make([]byte, 16<<10)
+		for {
+			if _, err := tc.Read(drain); err != nil {
+				break
+			}
+		}
+	}
+	// Re-baseline AFTER banking, so the response body does not land in the
+	// teardown section.
+	beforeClose := tap.records()
+
 	// Clean close: Go's crypto/tls sends close_notify here, so this shows both
 	// what a real client emits and whether the server answers in kind.
 	tap.SetDeadline(time.Now().Add(2 * time.Second))
@@ -223,7 +245,7 @@ func once(host, addr string, cache tls.ClientSessionCache, report bool) error {
 	time.Sleep(150 * time.Millisecond)
 	final := tap.records()
 
-	fmt.Printf("%s  (resumed, version %x cipher %x)\n", host, st.Version, st.CipherSuite)
+	fmt.Printf("%s  (%s, version %x cipher %x)\n", host, kind, st.Version, st.CipherSuite)
 	fmt.Printf("  opening (%d records):\n", handshakeDone)
 	for _, r := range final[:handshakeDone] {
 		fmt.Printf("    %s\n", r)
@@ -242,10 +264,14 @@ func once(host, addr string, cache tls.ClientSessionCache, report bool) error {
 	}
 	fmt.Printf("    => server sent %d record(s) unprompted, sizes %v\n", len(srvQuiet), srvQuiet)
 
-	tearRecs := final[len(afterQuiet):]
+	tearRecs := final[len(beforeClose):]
 	fmt.Printf("  teardown (%d records), close err=%v:\n", len(tearRecs), closeErr)
 	for _, r := range tearRecs {
 		fmt.Printf("    %s\n", r)
+	}
+	if kind == "full" {
+		fmt.Printf("    (ticket banking: the request below is sent AFTER the quiet window, so the\n")
+		fmt.Printf("     unprompted count above is unaffected by it)\n")
 	}
 	var cTear, sTear []int
 	for _, r := range tearRecs {
