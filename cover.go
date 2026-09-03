@@ -216,7 +216,10 @@ func TicketLenForCover(host string) int {
 	if p, err := CoverFor(host); err == nil {
 		return p.TicketLen
 	}
-	if host == "github.com" {
+	// EqualFold, because CoverFor lowercases before its lookup and a fallback
+	// that does not would answer differently for "GitHub.com" than for
+	// "github.com" -- a silent 176 where the record says 32.
+	if strings.EqualFold(host, "github.com") {
 		return 32
 	}
 	return DefaultTicketLen

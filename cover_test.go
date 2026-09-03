@@ -2,6 +2,7 @@ package twiddle
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -105,5 +106,24 @@ func TestSomeCoverSplitsItsRemainder(t *testing.T) {
 	}
 	if single == 0 {
 		t.Error("every cover splits; cloudflare and google were measured coalescing into one 64 B record")
+	}
+}
+
+// CoverFor lowercases before its lookup, so every per-cover helper must agree
+// on case or they answer differently for the same host.
+func TestPerCoverHelpersAreCaseInsensitive(t *testing.T) {
+	for _, host := range MeasuredCovers() {
+		upper := strings.ToUpper(host)
+		if got, want := TicketLenForCover(upper), TicketLenForCover(host); got != want {
+			t.Errorf("TicketLenForCover(%q)=%d but (%q)=%d", upper, got, host, want)
+		}
+		if got, want := PSKFirstForCover(upper), PSKFirstForCover(host); got != want {
+			t.Errorf("PSKFirstForCover(%q)=%v but (%q)=%v", upper, got, host, want)
+		}
+	}
+	// The github.com fallback is a literal compare, so it is the one that can
+	// disagree: 32 is the recorded measurement, DefaultTicketLen is not.
+	if got := TicketLenForCover("GitHub.com"); got != 32 {
+		t.Errorf("TicketLenForCover(\"GitHub.com\")=%d, want the recorded 32", got)
 	}
 }

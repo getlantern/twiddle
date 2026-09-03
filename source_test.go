@@ -576,3 +576,39 @@ func TestConfigInlineFallsThroughWhenUnusable(t *testing.T) {
 		t.Errorf("Skipped does not mention the inline pool: %v", p.Skipped)
 	}
 }
+
+// The failure path must say WHY, and keep the per-line reasons. "no source
+// configured" and "a source was configured but every entry was rejected" want
+// opposite fixes, and Skipped holds the answer -- dropping it here loses the
+// diagnosis exactly when it is needed.
+func TestLoadPoolFailureCarriesTheReasons(t *testing.T) {
+	// Nothing configured: the error should say so plainly.
+	_, err := LoadPool(Sources{})
+	if err == nil {
+		t.Fatal("empty sources must not silently succeed")
+	}
+	if !strings.Contains(err.Error(), "no device or config source was configured") {
+		t.Errorf("error does not distinguish the empty case: %v", err)
+	}
+
+	// Configured but unusable: the per-line reasons must survive.
+	dir := t.TempDir()
+	device := filepath.Join(dir, "device.hex")
+	if err := os.WriteFile(device, []byte("not-hex\nalso-not-hex\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = LoadPool(Sources{Device: device})
+	if err == nil {
+		t.Fatal("an entirely unusable device pool must fail when embedded is disabled")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "no device or config source was configured") {
+		t.Error("a configured-but-unusable pool was reported as though nothing was configured")
+	}
+	if !strings.Contains(msg, device) {
+		t.Errorf("the failing pool path is not in the error: %v", err)
+	}
+	if strings.Count(msg, "line ") < 2 {
+		t.Errorf("per-line reasons were dropped from the error: %v", err)
+	}
+}

@@ -130,7 +130,17 @@ func LoadPool(s Sources) (*Pool, error) {
 	}
 
 	if !s.AllowEmbedded {
-		return nil, fmt.Errorf("twiddle: no usable hello pool (device and config empty; embedded fallback disabled)")
+		// Carry the reasons. This path is reached both when no source was
+		// configured AND when one was but every entry in it was unusable, and
+		// those want opposite fixes -- provision a pool, or find out why the
+		// pool provisioned is being rejected. Skipped holds the per-line
+		// answer, so discarding it here loses the diagnosis at exactly the
+		// moment it is needed.
+		err := fmt.Errorf("twiddle: no usable hello pool from device or config, and the embedded fallback is disabled")
+		if len(skipped) > 0 {
+			return nil, errors.Join(append([]error{err}, skipped...)...)
+		}
+		return nil, fmt.Errorf("%w (no device or config source was configured)", err)
 	}
 
 	// The embedded pool is partitioned on the same terms. It needs it: four of

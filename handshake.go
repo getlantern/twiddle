@@ -250,7 +250,12 @@ func readTickets(c *Conn) (*Credential, error) {
 	if err != nil {
 		return nil, err
 	}
-	if typ != contentHandshake && typ != contentAppData {
+	// writeTickets emits contentHandshake and nothing else, so accepting
+	// application_data here only widens what can be mistaken for a credential.
+	// After the opening the tunnel carries app-data records; if the ordering
+	// ever shifts, a lenient check would parse the first of them as a rotated
+	// ticket instead of failing loudly.
+	if typ != contentHandshake {
 		return nil, errMalformed
 	}
 	if len(body) < 2 {

@@ -362,3 +362,40 @@ func serverHelloExtOrder(t *testing.T, sh []byte) []uint16 {
 	}
 	return out
 }
+
+// writeTickets emits contentHandshake and nothing else. Accepting
+// application_data would widen what can be mistaken for a rotated credential:
+// after the opening the tunnel carries app-data records, so a lenient check
+// would parse the first of them as a ticket instead of failing.
+func TestReadTicketsRejectsNonHandshakeRecords(t *testing.T) {
+	cover := mustCover(t, "www.microsoft.com")
+	sess, err := DeriveSession(make([]byte, 32), make([]byte, 32), cover.CipherSuite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	wSess, err := DeriveSession(make([]byte, 32), make([]byte, 32), cover.CipherSuite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := NewConn(server, wSess, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewConn(client, sess, true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A well-formed credential body, but sent as application_data.
+	body := make([]byte, 2+16+32)
+	body[1] = 16
+	go func() { _ = w.writeSized(contentAppData, body, sessionTicketWire) }()
+
+	if _, err := readTickets(r); err == nil {
+		t.Error("readTickets accepted an application_data record as a rotated credential")
+	}
+}
