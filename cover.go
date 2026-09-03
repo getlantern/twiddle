@@ -22,7 +22,7 @@ type CoverProfile struct {
 	BinderLen   int
 	TicketLen   int
 	PSKFirst    bool
-	// ServerRemainder is the encrypted record SEQUENCE the cover sends after
+	// ResumedRemainder is the encrypted record SEQUENCE the cover sends after
 	// ServerHello and ChangeCipherSpec -- not a total.
 	//
 	// The distinction is the whole point: cloudflare and google coalesce
@@ -31,15 +31,45 @@ type CoverProfile struct {
 	// count matched while we put 3 server records on the wire where the real
 	// identity puts 4. The total is what a sum models; the sequence is what an
 	// observer counts.
-	ServerRemainder []int
+	ResumedRemainder []int
 
-	// ClientFlight is a TOTAL, deliberately, because only the total is
+	// FullRemainder is the same sequence for a FULL handshake, where the
+	// remainder carries the certificate and is one to two orders of magnitude
+	// larger: 3848 / 3921 / 8273 B against 64 / 64 / 106 resumed.
+	//
+	// It is EMPTY in the table on purpose. Unlike the resumed remainder, this
+	// one cannot be a constant: it moves run to run as the DER-encoded ECDSA
+	// signature in CertificateVerify changes length (cloudflare 3847/3848/3848,
+	// google 3920/3921/3921, while microsoft's fixed-length RSA signature holds
+	// 8273), and it changes outright on every certificate rotation. A cover
+	// emitting a full handshake must have this filled by coverprobe against the
+	// live upstream; a stale constant here would be worse than none.
+	FullRemainder []int
+
+	// FullRemainderJitter is the per-position range, in bytes, over which each
+	// full-handshake remainder record was observed to vary. Same length as
+	// FullRemainder when set.
+	//
+	// It exists because the certificate flight is not a constant even between
+	// two connections a second apart: cloudflare was measured at 3847 and 3848,
+	// google at 3920 and 3921, while microsoft held 8273 exactly. That is what
+	// a DER-encoded ECDSA signature in CertificateVerify does -- its length
+	// varies with the integers it encodes -- and microsoft's fixed-length RSA
+	// signature is why it does not move.
+	//
+	// An emitter that sends FullRemainder verbatim would be the only host on
+	// the network whose certificate flight is byte-identical every time. The
+	// baseline is therefore the smallest length observed and the emitted length
+	// is drawn from [baseline, baseline+jitter].
+	FullRemainderJitter []int
+
+	// ResumedClientFlight is a TOTAL, deliberately, because only the total is
 	// measured. It comes from Chrome captures
 	// (harvest/testdata/tls13-burst-resumption.log); the record split within it
 	// is unknown, and a Go TLS client is not a valid probe for it -- see the
 	// caveat in harvest/testdata/postflight-resumed.log. Do not turn this into
 	// a sequence until Chrome has been captured.
-	ClientFlight int
+	ResumedClientFlight int
 }
 
 // ErrUnknownCover is returned when a caller names a host we have not measured,
@@ -48,31 +78,31 @@ var ErrUnknownCover = fmt.Errorf("twiddle: unknown cover identity")
 
 var covers = map[string]CoverProfile{
 	"www.cloudflare.com": {
-		Host:            "www.cloudflare.com",
-		CipherSuite:     TLS_AES_128_GCM_SHA256,
-		BinderLen:       32,
-		TicketLen:       176,
-		PSKFirst:        true,
-		ServerRemainder: []int{64},
-		ClientFlight:    149,
+		Host:                "www.cloudflare.com",
+		CipherSuite:         TLS_AES_128_GCM_SHA256,
+		BinderLen:           32,
+		TicketLen:           176,
+		PSKFirst:            true,
+		ResumedRemainder:    []int{64},
+		ResumedClientFlight: 149,
 	},
 	"www.google.com": {
-		Host:            "www.google.com",
-		CipherSuite:     TLS_AES_128_GCM_SHA256,
-		BinderLen:       32,
-		TicketLen:       230,
-		PSKFirst:        true,
-		ServerRemainder: []int{64},
-		ClientFlight:    145,
+		Host:                "www.google.com",
+		CipherSuite:         TLS_AES_128_GCM_SHA256,
+		BinderLen:           32,
+		TicketLen:           230,
+		PSKFirst:            true,
+		ResumedRemainder:    []int{64},
+		ResumedClientFlight: 145,
 	},
 	"www.microsoft.com": {
-		Host:            "www.microsoft.com",
-		CipherSuite:     TLS_AES_256_GCM_SHA384,
-		BinderLen:       48,
-		TicketLen:       256,
-		PSKFirst:        false,
-		ServerRemainder: []int{32, 74},
-		ClientFlight:    164,
+		Host:                "www.microsoft.com",
+		CipherSuite:         TLS_AES_256_GCM_SHA384,
+		BinderLen:           48,
+		TicketLen:           256,
+		PSKFirst:            false,
+		ResumedRemainder:    []int{32, 74},
+		ResumedClientFlight: 164,
 	},
 }
 
@@ -102,7 +132,7 @@ func (p CoverProfile) Valid() error {
 	}
 	if p.CipherSuite != known.CipherSuite || p.BinderLen != known.BinderLen ||
 		p.TicketLen != known.TicketLen || p.PSKFirst != known.PSKFirst ||
-		!slices.Equal(p.ServerRemainder, known.ServerRemainder) || p.ClientFlight != known.ClientFlight {
+		!slices.Equal(p.ResumedRemainder, known.ResumedRemainder) || p.ResumedClientFlight != known.ResumedClientFlight {
 		return fmt.Errorf("twiddle: cover profile for %s does not match the measured identity", p.Host)
 	}
 	return nil
@@ -139,12 +169,34 @@ func (p CoverProfile) validateClientHello(h *ClientHello) ([]byte, error) {
 	return ticket, nil
 }
 
-// ServerOpeningBurst totals the first server burst: ServerHello, the
+// FullOpeningBurst totals a full handshake's first server burst. Zero when
+// FullRemainder is unset, which is the table's default: the full profile is
+// probe-supplied, never assumed.
+func (p CoverProfile) FullOpeningBurst() int {
+	if len(p.FullRemainder) == 0 {
+		return 0
+	}
+	total := ServerHelloFullLen + len(ChangeCipherSpec())
+	for _, n := range p.FullRemainder {
+		total += n
+	}
+	return total
+}
+
+// CanEmitFullHandshake reports whether this profile has been given a measured
+// full-handshake shape. Without one, an egress must not offer that carrier:
+// emitting a guessed certificate flight is worse than only offering the
+// resumed path.
+func (p CoverProfile) CanEmitFullHandshake() bool {
+	return len(p.FullRemainder) > 0
+}
+
+// ResumedOpeningBurst totals the first server burst: ServerHello, the
 // ChangeCipherSpec, and every encrypted remainder record. Derived from the
 // sequence so the two can never disagree.
-func (p CoverProfile) ServerOpeningBurst() int {
+func (p CoverProfile) ResumedOpeningBurst() int {
 	total := ServerHelloResumedLen + len(ChangeCipherSpec())
-	for _, n := range p.ServerRemainder {
+	for _, n := range p.ResumedRemainder {
 		total += n
 	}
 	return total
@@ -153,7 +205,7 @@ func (p CoverProfile) ServerOpeningBurst() int {
 // ClientEncryptedWire is the application_data record that follows the client
 // CCS. Measured client flights are 145–164 B including the 6-byte CCS.
 func (p CoverProfile) ClientEncryptedWire() int {
-	return p.ClientFlight - len(ChangeCipherSpec())
+	return p.ResumedClientFlight - len(ChangeCipherSpec())
 }
 
 // TicketLenForCover returns the measured ticket length, including for a known
@@ -184,6 +236,11 @@ func PSKFirstForCover(host string) bool {
 // they stay here where the profile does.
 type ProbeResult struct {
 	Host string
+	// Full says the probe measured a FULL handshake rather than a resumed one.
+	// The two have different ServerHello lengths and wildly different
+	// remainders, so a result adopted into the wrong variant would be silently
+	// catastrophic -- hence a field rather than inference from the numbers.
+	Full bool
 	// ServerHello is the first handshake record's wire length.
 	ServerHello int
 	// Remainder is the encrypted record SEQUENCE after ServerHello and the
@@ -202,38 +259,74 @@ const (
 	// looks like a different server rather than the same one having changed.
 	// The measured spread across three covers is 42 B, 1291 to 1333.
 	maxBurstDrift = 256
+
+	// A full handshake's burst has no constant to compare against, so it is
+	// bounded instead. Measured at 5069, 5142 and 9886; the range allows for a
+	// small chain on one side and a long one with many intermediates on the
+	// other, while still rejecting a resumed burst or a multi-megabyte answer
+	// from something that is not the cover.
+	minFullBurst = 2000
+	maxFullBurst = 32768
 )
 
 // Adopt folds a probe into a profile and returns what the egress should emit.
 //
-// Only what the probe actually measured is replaced. The resumption-derived
-// fields -- cipher, binder length, ticket length, PSK order -- come from p,
-// because they describe the handshake rather than the opening burst.
+// Only what the probe actually measured is replaced, and only into the variant
+// it measured. The resumption-derived fields -- cipher, binder length, ticket
+// length, PSK order -- come from p, because they describe the handshake rather
+// than the opening burst.
 //
 // A probe that disagrees with the known identity is REJECTED rather than
 // adopted, and rejection is the point: whatever a probe returns would otherwise
 // be emitted by every client on that egress, so a CDN edge, a captive portal or
-// a hostile upstream answering in the cover's place must not become the
-// profile. Fail closed, and let the caller decide whether to keep serving on
-// the last good profile or refuse to start.
+// a hostile upstream answering in the cover's place must not silently become
+// the profile. Fail closed, and let the caller decide whether to keep serving
+// on the last good profile or refuse to start.
+//
+// The two variants are validated differently, because only one has a baseline.
+// The resumed remainder is a stable measured constant, so a probe is checked
+// against it. The full remainder is the certificate: there is no constant to
+// compare to -- it moves run to run and on every rotation -- so it is checked
+// structurally instead, on the ServerHello length, the record count and a
+// plausible size range.
 func (p CoverProfile) Adopt(res ProbeResult) (CoverProfile, error) {
 	if res.Host != p.Host {
 		return p, fmt.Errorf("twiddle: probe of %s cannot update the %s profile", res.Host, p.Host)
-	}
-	if res.ServerHello != ServerHelloResumedLen {
-		return p, fmt.Errorf("twiddle: probe of %s returned a %d B ServerHello, not the %d B resumed shape we synthesise",
-			res.Host, res.ServerHello, ServerHelloResumedLen)
 	}
 	if len(res.Remainder) == 0 || len(res.Remainder) > maxRemainderRecords {
 		return p, fmt.Errorf("twiddle: probe of %s returned %d remainder records, outside 1..%d",
 			res.Host, len(res.Remainder), maxRemainderRecords)
 	}
-	known := p.ServerOpeningBurst()
+	for _, n := range res.Remainder {
+		if n <= recordHeaderLen {
+			return p, fmt.Errorf("twiddle: probe of %s returned a %d B remainder record", res.Host, n)
+		}
+	}
+
+	if res.Full {
+		if res.ServerHello != ServerHelloFullLen {
+			return p, fmt.Errorf("twiddle: full probe of %s returned a %d B ServerHello, not the %d B full shape",
+				res.Host, res.ServerHello, ServerHelloFullLen)
+		}
+		if res.OpeningBurst < minFullBurst || res.OpeningBurst > maxFullBurst {
+			return p, fmt.Errorf("twiddle: full probe of %s returned a %d B opening burst, outside the plausible %d..%d for a certificate flight",
+				res.Host, res.OpeningBurst, minFullBurst, maxFullBurst)
+		}
+		out := p
+		out.FullRemainder = append([]int(nil), res.Remainder...)
+		return out, nil
+	}
+
+	if res.ServerHello != ServerHelloResumedLen {
+		return p, fmt.Errorf("twiddle: resumed probe of %s returned a %d B ServerHello, not the %d B resumed shape we synthesise",
+			res.Host, res.ServerHello, ServerHelloResumedLen)
+	}
+	known := p.ResumedOpeningBurst()
 	if delta := res.OpeningBurst - known; delta < -maxBurstDrift || delta > maxBurstDrift {
-		return p, fmt.Errorf("twiddle: probe of %s returned a %d B opening burst, %+d from the measured %d; not adopting",
+		return p, fmt.Errorf("twiddle: resumed probe of %s returned a %d B opening burst, %+d from the measured %d; not adopting",
 			res.Host, res.OpeningBurst, delta, known)
 	}
 	out := p
-	out.ServerRemainder = append([]int(nil), res.Remainder...)
+	out.ResumedRemainder = append([]int(nil), res.Remainder...)
 	return out, nil
 }

@@ -64,6 +64,13 @@ type ServerHelloParams struct {
 // handshake. Synthesised output is asserted against it.
 const ServerHelloResumedLen = 1221
 
+// ServerHelloFullLen is the same shape without pre_shared_key: a FULL
+// handshake's ServerHello. Measured at 1215 on all three covers
+// (harvest/testdata/postflight-full-vs-resumed.log), exactly 6 bytes below the
+// resumed one, which is the pre_shared_key extension. A full-handshake carrier
+// cannot reuse the resumed length.
+const ServerHelloFullLen = 1215
+
 // SynthesizeServerHello builds the ServerHello handshake record.
 func SynthesizeServerHello(p ServerHelloParams) ([]byte, error) {
 	if len(p.SessionIDEcho) == 0 || len(p.SessionIDEcho) > 32 {

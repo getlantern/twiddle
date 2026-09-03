@@ -100,3 +100,23 @@ Reproduce:
 
   go run ./cmd/postflight -quiet 1s
   go run ./cmd/postflight -hosts www.microsoft.com -quiet 2s
+
+ADDENDUM: the jitter, sampled
+------------------------------------------------------------------------------
+  tool   coverprobe.SampleFull, 5 samples per host, 2026-09-03
+
+    www.cloudflare.com   baseline [3846]             jitter [1]
+    www.google.com       baseline [3920]             jitter [1]
+    www.microsoft.com    baseline [32 8273 286 74]   jitter [0 0 0 0]
+
+Confirms the prediction from the run-to-run spread: the two ECDSA covers move,
+the RSA one does not. It is the DER-encoded signature in CertificateVerify --
+its length depends on the integers it encodes -- and microsoft's fixed-length
+RSA signature is why it holds 8273 exactly across every sample.
+
+CAVEAT ON SAMPLE COUNT. Five samples reported a jitter of 1 for cloudflare, but
+across all runs in this file its single record has been seen at 3846, 3847 AND
+3848 -- a range of 2. A small sample underestimates the range, so a profile
+built from one should treat its jitter as a floor, not the truth. Sample more
+before shipping a number, and re-sample after any certificate rotation, when
+the baseline itself moves.

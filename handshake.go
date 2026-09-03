@@ -109,7 +109,7 @@ func Client(raw net.Conn, cfg ClientConfig) (*Conn, *Credential, error) {
 	// remainder 32/74 where cloudflare and google coalesce it into one 64.
 	// Reading a fixed one record left microsoft's second record in the stream
 	// and every later read misaligned.
-	for range cfg.Cover.ServerRemainder {
+	for range cfg.Cover.ResumedRemainder {
 		if _, _, err := conn.consumeRecord(); err != nil {
 			return nil, nil, err
 		}
@@ -209,7 +209,7 @@ func Server(raw net.Conn, cfg ServerConfig) (*Conn, error) {
 
 	// One write per record the cover actually sends: microsoft splits the
 	// remainder 32/74 where cloudflare and google coalesce it into one 64.
-	for _, n := range cfg.Cover.ServerRemainder {
+	for _, n := range cfg.Cover.ResumedRemainder {
 		if err := conn.writeSized(contentHandshake, nil, n); err != nil {
 			return nil, err
 		}

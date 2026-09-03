@@ -35,8 +35,8 @@ import (
 // the probe the way it routes its masquerade traffic.
 type Dialer func(ctx context.Context) (net.Conn, error)
 
-// Probe establishes a session with host, resumes it, and reports the resumed
-// opening the way an observer sees it.
+// Probe establishes a session with host, resumes it, and reports the RESUMED
+// opening. ProbeBoth reports the full handshake as well.
 //
 // The client here is Go's crypto/tls, not Chrome, which is a valid probe for
 // what the SERVER emits and not for what a client does — the server's opening
@@ -46,33 +46,72 @@ type Dialer func(ctx context.Context) (net.Conn, error)
 // not use this to derive anything client-side; see the caveat in
 // harvest/testdata/postflight-resumed.log.
 func Probe(ctx context.Context, dial Dialer, host string) (tw.ProbeResult, error) {
-	var res tw.ProbeResult
-	res.Host = host
+	_, resumed, err := ProbeBoth(ctx, dial, host)
+	return resumed, err
+}
+
+// ProbeBoth reports the full handshake and the resumed one from a single pair
+// of connections against the same server, so the two are directly comparable.
+//
+// The full handshake is not a by-product: only ~4% of real browsing connections
+// are resumptions, so it is the shape the population actually takes, and its
+// remainder — the certificate flight — cannot come from a table because it
+// moves run to run and on every rotation. An egress offering that carrier has
+// to probe for it.
+//
+// The connection that banks the ticket is the same one the full profile is read
+// from, which is why the request that triggers ticket issuance is sent only
+// AFTER the full opening has been captured. cloudflare and google issue no
+// ticket until application data has flowed, so without that request there is
+// nothing to resume with — and with it sent too early, the full profile would
+// be polluted by the response.
+func ProbeBoth(ctx context.Context, dial Dialer, host string) (full, resumed tw.ProbeResult, err error) {
+	full.Host, resumed.Host = host, host
+	full.Full = true
 
 	cache := tls.NewLRUClientSessionCache(4)
-	// First connection banks a ticket; nothing about it is reported.
-	if err := session(ctx, dial, host, cache, nil); err != nil {
-		return res, fmt.Errorf("coverprobe %s: priming handshake: %w", host, err)
+	// bank: this connection must also elicit a ticket, or there is nothing to
+	// resume. The request goes out only after the opening is frozen.
+	fullTap := &recorder{}
+	if err := session(ctx, dial, host, cache, fullTap, true); err != nil {
+		return full, resumed, fmt.Errorf("coverprobe %s: full handshake: %w", host, err)
+	}
+	if fullTap.resumed {
+		return full, resumed, fmt.Errorf("coverprobe %s: first connection resumed; the full profile would be wrong", host)
+	}
+	if err := readOpening(&full, fullTap, tw.ServerHelloFullLen, host); err != nil {
+		return full, resumed, err
 	}
 
 	tap := &recorder{}
-	if err := session(ctx, dial, host, cache, tap); err != nil {
-		return res, fmt.Errorf("coverprobe %s: resumed handshake: %w", host, err)
+	if err := session(ctx, dial, host, cache, tap, false); err != nil {
+		return full, resumed, fmt.Errorf("coverprobe %s: resumed handshake: %w", host, err)
 	}
 	if !tap.resumed {
-		return res, fmt.Errorf("coverprobe %s: upstream did not resume, so this is not the opening we imitate", host)
+		return full, resumed, fmt.Errorf("coverprobe %s: upstream did not resume, so this is not the opening we imitate", host)
 	}
+	if err := readOpening(&resumed, tap, tw.ServerHelloResumedLen, host); err != nil {
+		return full, resumed, err
+	}
+	return full, resumed, nil
+}
 
+// readOpening turns one tapped connection's server records into a ProbeResult.
+func readOpening(res *tw.ProbeResult, tap *recorder, wantServerHello int, host string) error {
 	recs := tap.serverRecords()
 	if len(recs) < 3 {
-		return res, fmt.Errorf("coverprobe %s: server sent %d records, want ServerHello + ccs + remainder", host, len(recs))
+		return fmt.Errorf("coverprobe %s: server sent %d records, want ServerHello + ccs + remainder", host, len(recs))
 	}
 	if recs[0].typ != contentHandshake {
-		return res, fmt.Errorf("coverprobe %s: first record is type %#02x, not a handshake", host, recs[0].typ)
+		return fmt.Errorf("coverprobe %s: first record is type %#02x, not a handshake", host, recs[0].typ)
 	}
 	res.ServerHello = recs[0].wire
+	if res.ServerHello != wantServerHello {
+		return fmt.Errorf("coverprobe %s: ServerHello is %d B, want %d for this handshake type",
+			host, res.ServerHello, wantServerHello)
+	}
 	if recs[1].typ != contentCCS {
-		return res, fmt.Errorf("coverprobe %s: second record is type %#02x, not a ChangeCipherSpec", host, recs[1].typ)
+		return fmt.Errorf("coverprobe %s: second record is type %#02x, not a ChangeCipherSpec", host, recs[1].typ)
 	}
 	ccs := recs[1].wire
 
@@ -80,7 +119,7 @@ func Probe(ctx context.Context, dial Dialer, host string) (tw.ProbeResult, error
 	// burst has clearly ended, is the encrypted remainder.
 	for _, r := range recs[2:] {
 		if r.typ == contentAlert {
-			return res, fmt.Errorf("coverprobe %s: upstream sent an alert during the opening", host)
+			return fmt.Errorf("coverprobe %s: upstream sent an alert during the opening", host)
 		}
 		if r.typ != contentAppData {
 			break
@@ -88,20 +127,20 @@ func Probe(ctx context.Context, dial Dialer, host string) (tw.ProbeResult, error
 		res.Remainder = append(res.Remainder, r.wire)
 	}
 	if len(res.Remainder) == 0 {
-		return res, fmt.Errorf("coverprobe %s: no encrypted remainder after the ChangeCipherSpec", host)
+		return fmt.Errorf("coverprobe %s: no encrypted remainder after the ChangeCipherSpec", host)
 	}
 	res.OpeningBurst = res.ServerHello + ccs
 	for _, n := range res.Remainder {
 		res.OpeningBurst += n
 	}
 	res.Elapsed = tap.elapsed
-	return res, nil
+	return nil
 }
 
 // session runs one connection. When tap is non-nil it records the wire and
 // stops right after the handshake, so what it holds is the opening and nothing
 // else.
-func session(ctx context.Context, dial Dialer, host string, cache tls.ClientSessionCache, tap *recorder) error {
+func session(ctx context.Context, dial Dialer, host string, cache tls.ClientSessionCache, tap *recorder, bank bool) error {
 	raw, err := dial(ctx)
 	if err != nil {
 		return err
@@ -125,20 +164,24 @@ func session(ctx context.Context, dial Dialer, host string, cache tls.ClientSess
 	if err := tc.HandshakeContext(ctx); err != nil {
 		return err
 	}
-	if tap != nil {
-		tap.resumed = tc.ConnectionState().DidResume
-		tap.elapsed = time.Since(tap.start)
-		return tc.Close()
-	}
+	tap.resumed = tc.ConnectionState().DidResume
+	tap.elapsed = time.Since(tap.start)
+	// Freeze here: everything recorded from now on is the response to the
+	// banking request, and letting it into the record list would append the
+	// HTTP body to the remainder.
+	tap.freeze()
 
-	// Priming run: read enough for the ticket to arrive and be cached, then
-	// close cleanly so it is usable.
-	_, _ = tc.Write([]byte("GET / HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\n\r\n"))
-	_ = tc.SetReadDeadline(time.Now().Add(2 * time.Second))
-	buf := make([]byte, 16<<10)
-	for {
-		if _, err := tc.Read(buf); err != nil {
-			break
+	if bank {
+		// cloudflare and google issue no ticket until application data has
+		// flowed, so without this there is nothing to resume with. It runs
+		// after the freeze precisely so it cannot pollute what was measured.
+		_, _ = tc.Write([]byte("GET / HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\n\r\n"))
+		_ = tc.SetReadDeadline(time.Now().Add(2 * time.Second))
+		buf := make([]byte, 16<<10)
+		for {
+			if _, err := tc.Read(buf); err != nil {
+				break
+			}
 		}
 	}
 	return tc.Close()
@@ -166,9 +209,19 @@ type recorder struct {
 	elapsed time.Duration
 	resumed bool
 
-	mu   sync.Mutex
-	buf  []byte
-	recs []record
+	mu     sync.Mutex
+	buf    []byte
+	recs   []record
+	frozen []record
+}
+
+// freeze fixes what serverRecords reports, so traffic after the opening cannot
+// be mistaken for part of it.
+func (r *recorder) freeze() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.frozen = make([]record, len(r.recs))
+	copy(r.frozen, r.recs)
 }
 
 func (r *recorder) Read(b []byte) (int, error) {
@@ -192,7 +245,65 @@ func (r *recorder) Read(b []byte) (int, error) {
 func (r *recorder) serverRecords() []record {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]record, len(r.recs))
-	copy(out, r.recs)
+	src := r.recs
+	if r.frozen != nil {
+		src = r.frozen
+	}
+	out := make([]record, len(src))
+	copy(out, src)
 	return out
+}
+
+// SampleFull probes the full handshake n times and reports the baseline
+// remainder together with the range each record was seen to move over.
+//
+// One probe cannot tell a constant from a variable, and the full remainder is a
+// variable: the DER-encoded ECDSA signature in CertificateVerify changes length
+// between connections. Emitting a single observation verbatim would make us the
+// only host on the network whose certificate flight never varies -- so the
+// spread has to be measured, not assumed.
+//
+// The baseline is the smallest length seen at each position and the jitter is
+// the observed range. A run where the record COUNT changes between samples is
+// rejected: that is a different server answering, not the same one jittering.
+func SampleFull(ctx context.Context, dial Dialer, host string, n int) (tw.ProbeResult, []int, error) {
+	if n < 2 {
+		return tw.ProbeResult{}, nil, fmt.Errorf("coverprobe %s: SampleFull needs at least 2 samples to see a range", host)
+	}
+	var base tw.ProbeResult
+	var lo, hi []int
+	for i := 0; i < n; i++ {
+		full, _, err := ProbeBoth(ctx, dial, host)
+		if err != nil {
+			return base, nil, fmt.Errorf("coverprobe %s: sample %d: %w", host, i+1, err)
+		}
+		if i == 0 {
+			base = full
+			lo = append([]int(nil), full.Remainder...)
+			hi = append([]int(nil), full.Remainder...)
+			continue
+		}
+		if len(full.Remainder) != len(lo) {
+			return base, nil, fmt.Errorf("coverprobe %s: sample %d returned %d remainder records, first returned %d — not the same server",
+				host, i+1, len(full.Remainder), len(lo))
+		}
+		for j, v := range full.Remainder {
+			if v < lo[j] {
+				lo[j] = v
+			}
+			if v > hi[j] {
+				hi[j] = v
+			}
+		}
+	}
+	jitter := make([]int, len(lo))
+	for i := range lo {
+		jitter[i] = hi[i] - lo[i]
+	}
+	base.Remainder = lo
+	base.OpeningBurst = tw.ServerHelloFullLen + len(tw.ChangeCipherSpec())
+	for _, v := range lo {
+		base.OpeningBurst += v
+	}
+	return base, jitter, nil
 }

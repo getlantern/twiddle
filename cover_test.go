@@ -23,7 +23,7 @@ func TestCoverProfilesMatchTheMeasurements(t *testing.T) {
 	//   ticket lengths            harvest/cmd/resume        (tls13-resume.log)
 	//   PSK extension order       harvest/cmd/shresume
 	//   ServerHello 1221          serverhello-resumption-delta.log
-	//   burst totals, ClientFlight  tls13-burst-resumption.log  (Chrome)
+	//   burst totals, ResumedClientFlight  tls13-burst-resumption.log  (Chrome)
 	//   remainder record SPLIT    postflight-resumed.log      (server side)
 	want := map[string]struct {
 		cipher       uint16
@@ -66,16 +66,16 @@ func TestCoverProfilesMatchTheMeasurements(t *testing.T) {
 		if p.PSKFirst != w.pskFirst {
 			t.Errorf("%s PSKFirst %v, measured %v", host, p.PSKFirst, w.pskFirst)
 		}
-		if !slices.Equal(p.ServerRemainder, w.remainder) {
-			t.Errorf("%s server remainder %v, measured %v", host, p.ServerRemainder, w.remainder)
+		if !slices.Equal(p.ResumedRemainder, w.remainder) {
+			t.Errorf("%s server remainder %v, measured %v", host, p.ResumedRemainder, w.remainder)
 		}
-		if p.ClientFlight != w.clientFlight {
-			t.Errorf("%s client flight %d, measured %d", host, p.ClientFlight, w.clientFlight)
+		if p.ResumedClientFlight != w.clientFlight {
+			t.Errorf("%s client flight %d, measured %d", host, p.ResumedClientFlight, w.clientFlight)
 		}
 		// The derived total must agree with the burst the captures recorded,
 		// which is what catches a remainder edited to the right total by the
 		// wrong split, or vice versa.
-		if got := p.ServerOpeningBurst(); got != w.openingBurst {
+		if got := p.ResumedOpeningBurst(); got != w.openingBurst {
 			t.Errorf("%s opening burst %d, measured %d", host, got, w.openingBurst)
 		}
 	}
@@ -91,10 +91,10 @@ func TestSomeCoverSplitsItsRemainder(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(p.ServerRemainder) == 0 {
+		if len(p.ResumedRemainder) == 0 {
 			t.Errorf("%s has an empty remainder; the server always sends one", host)
 		}
-		if len(p.ServerRemainder) > 1 {
+		if len(p.ResumedRemainder) > 1 {
 			split++
 		} else {
 			single++

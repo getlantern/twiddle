@@ -121,7 +121,7 @@ func TestOpeningRecordSequenceMatchesCover(t *testing.T) {
 			}
 			// The remainder is a SEQUENCE. Asserting only its total is what let
 			// microsoft's 32/74 split pass while we emitted a single 106.
-			rem := cover.ServerRemainder
+			rem := cover.ResumedRemainder
 			if len(sw) < 2+len(rem) {
 				t.Fatalf("server writes %v, want SH + CCS + %d remainder record(s)", sw, len(rem))
 			}
@@ -133,8 +133,8 @@ func TestOpeningRecordSequenceMatchesCover(t *testing.T) {
 			for _, n := range sw[:2+len(rem)] {
 				sum += n
 			}
-			if sum != cover.ServerOpeningBurst() {
-				t.Errorf("first server burst %d, measured %d", sum, cover.ServerOpeningBurst())
+			if sum != cover.ResumedOpeningBurst() {
+				t.Errorf("first server burst %d, measured %d", sum, cover.ResumedOpeningBurst())
 			}
 			if tick := 2 + len(rem); len(sw) < tick+1 || sw[tick] != sessionTicketWire {
 				t.Errorf("NewSessionTicket write %v, want %d after the opening burst", sw[tick:], sessionTicketWire)
@@ -149,10 +149,10 @@ func TestOpeningRecordSequenceMatchesCover(t *testing.T) {
 				t.Errorf("client CCS %d, want %d", cw[1], len(ChangeCipherSpec()))
 			}
 			if cw[2] != cover.ClientEncryptedWire() {
-				t.Errorf("client Finished %d, want %d (flight %d)", cw[2], cover.ClientEncryptedWire(), cover.ClientFlight)
+				t.Errorf("client Finished %d, want %d (flight %d)", cw[2], cover.ClientEncryptedWire(), cover.ResumedClientFlight)
 			}
-			if cw[1]+cw[2] != cover.ClientFlight {
-				t.Errorf("client flight %d, measured %d", cw[1]+cw[2], cover.ClientFlight)
+			if cw[1]+cw[2] != cover.ResumedClientFlight {
+				t.Errorf("client flight %d, measured %d", cw[1]+cw[2], cover.ResumedClientFlight)
 			}
 		})
 	}
