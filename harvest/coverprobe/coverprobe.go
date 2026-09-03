@@ -2,11 +2,23 @@
 // impersonates, so an egress emits what that server actually does instead of a
 // table someone has to keep current.
 //
-// It is a SEPARATE PACKAGE on purpose. Measuring a resumed opening means
-// completing a real handshake and resuming it, which needs a TLS
-// implementation — and the twiddle transport is built on depending on none.
-// Keeping the dependency here means core twiddle stays free of it and an egress
-// takes it deliberately, by importing this.
+// It lives under harvest/, with the rest of the measurement tooling, for one
+// reason: it imports crypto/tls, and nothing twiddle ships may.
+//
+// "This module depends on no TLS library for its own operation" is not a slogan
+// — it is why the transport is free of the preset-staleness treadmill that uTLS
+// lives on, and it should stay checkable by grep rather than by argument.
+// Measuring a RESUMED opening genuinely requires a TLS implementation: the
+// shape only exists after a server has issued a ticket, and reaching that means
+// completing a real handshake. So the dependency is real and the answer is to
+// put it where it cannot reach a shipped binary, next to cmd/postflight and
+// cmd/resume which already have it.
+//
+// That does not cost runtime probing. ProbeResult and CoverProfile.Adopt live
+// in core twiddle and need no TLS, so anything that ALREADY links a TLS stack —
+// lantern-box does, through sing-box — can probe with its own and feed the
+// result through Adopt. What it must not do is acquire the dependency by
+// importing twiddle.
 //
 // The naive approach does not work and it is worth recording why. A probe that
 // emits a twiddle hello and never completes the handshake — cmd/flight's

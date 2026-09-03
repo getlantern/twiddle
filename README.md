@@ -29,7 +29,9 @@ record. Measured against real servers, the entire observable structure of a TLS 
 
 So the connection need not be TLS at all. That removes uTLS as a handshake engine, the `key_share`
 ephemeral splice, PSK binders as a cryptographic obligation, HelloRetryRequest, and the whole
-preset-staleness treadmill. This module depends on **no TLS library** for its own operation.
+preset-staleness treadmill. This module depends on **no TLS library** for its own operation — enforced by
+`TestShippedPackagesImportNoTLSLibrary`, not by memory. The measurement tooling under `harvest/` does use
+`crypto/tls`, and stays there so it cannot reach a shipped binary.
 
 ## Authentication
 
@@ -91,6 +93,7 @@ harvest/            capture and measurement tooling
 docs/               design notes, each backed by a measurement log
   ech.md            why the pooled hellos carry GREASE ECH, and what censors do to ECH
   packetisation.md  TCP writes vs QUIC datagrams; Chaos Protection and a future QUIC mode
+  coverprobe/       measure a cover's profile from the live upstream (needs a TLS stack)
 site/               source of twiddle.lantern.io, the byte-by-byte walkthrough
 ```
 
