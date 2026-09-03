@@ -335,6 +335,22 @@ func otherBuildHello(t *testing.T, marker byte) []byte {
 	return other.Marshal()
 }
 
+func thirdBuildHello(t *testing.T, marker byte) []byte {
+	t.Helper()
+	third, err := ParseClientHello(otherBuildHello(t, marker))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, e := range third.Extensions {
+		if e.Type == ExtSupportedVersions {
+			third.Extensions = append(third.Extensions[:i:i], third.Extensions[i+1:]...)
+			return third.Marshal()
+		}
+	}
+	t.Fatal("test hello has no supported_versions extension")
+	return nil
+}
+
 // After two old-build hellos, Offer used to reject every new-build sample
 // because each was a 1-vs-2 minority. Ten new-build offers then accepted 0.
 func TestHarvesterNewBuildCanTakeOver(t *testing.T) {
@@ -373,6 +389,45 @@ func TestHarvesterNewBuildCanTakeOver(t *testing.T) {
 	}
 	if h.Find(ExtServerPadding) != nil {
 		t.Fatal("emit pool is still the old build")
+	}
+}
+
+func TestHarvesterPromotesOnePendingBuild(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "device.hex")
+	hv := NewHarvester(path, 0)
+	for _, marker := range []byte{1, 2} {
+		if ok, err := hv.Offer(tappedVariant(t, "a.example", marker)); err != nil || !ok {
+			t.Fatalf("seed active build %d: ok=%v err=%v", marker, ok, err)
+		}
+	}
+
+	for _, offer := range []struct {
+		record []byte
+		want   bool
+	}{
+		{otherBuildHello(t, 1), false},
+		{thirdBuildHello(t, 1), false},
+		{otherBuildHello(t, 2), false},
+		{otherBuildHello(t, 3), true},
+	} {
+		ok, err := hv.Offer(offer.record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok != offer.want {
+			t.Fatalf("Offer returned %v, want %v", ok, offer.want)
+		}
+	}
+
+	stored, errs := readPoolFile(path)
+	if len(errs) != 0 {
+		t.Fatalf("read promoted pool: %v", errs)
+	}
+	if len(stored) != 3 {
+		t.Fatalf("promoted pool has %d records, want 3 from the winning build", len(stored))
+	}
+	if err := Coherent(stored); err != nil {
+		t.Fatalf("promoted pool mixes pending builds: %v", err)
 	}
 }
 

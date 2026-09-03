@@ -1,6 +1,7 @@
 package twiddle
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -87,6 +88,37 @@ func (p CoverProfile) Valid() error {
 		return fmt.Errorf("twiddle: cover profile for %s does not match the measured identity", p.Host)
 	}
 	return nil
+}
+
+func (p CoverProfile) validateClientHello(h *ClientHello) ([]byte, error) {
+	if !strings.EqualFold(h.SNI(), p.Host) {
+		return nil, fmt.Errorf("twiddle: ClientHello SNI %q does not match cover %q", h.SNI(), p.Host)
+	}
+	offersCipher := false
+	for _, suite := range h.CipherSuites {
+		if suite == p.CipherSuite {
+			offersCipher = true
+			break
+		}
+	}
+	if !offersCipher {
+		return nil, fmt.Errorf("twiddle: ClientHello does not offer cover cipher %#04x", p.CipherSuite)
+	}
+	e := h.Find(ExtPreSharedKey)
+	if e == nil {
+		return nil, errors.New("twiddle: ClientHello carries no pre_shared_key")
+	}
+	ticket, _, binder, err := parsePSK(e.Data)
+	if err != nil {
+		return nil, err
+	}
+	if len(ticket) != p.TicketLen {
+		return nil, fmt.Errorf("twiddle: ClientHello ticket length %d does not match cover %d", len(ticket), p.TicketLen)
+	}
+	if len(binder) != p.BinderLen {
+		return nil, fmt.Errorf("twiddle: ClientHello binder length %d does not match cover %d", len(binder), p.BinderLen)
+	}
+	return ticket, nil
 }
 
 // ServerEncryptedWire is the application_data record that follows ServerHello

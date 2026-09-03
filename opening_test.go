@@ -239,6 +239,73 @@ func TestMicrosoftCoverUsesSHA384(t *testing.T) {
 	}
 }
 
+func TestCoverRejectsMismatchedClientHello(t *testing.T) {
+	cover := mustCover(t, "www.microsoft.com")
+	k := ticketKey(t)
+	credential, err := k.Issue(1, cover.TicketLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	makeHello := func(credential *Credential, sni string, binderLen int) *ClientHello {
+		t.Helper()
+		wire, _, err := Twiddle(pool(t)[0], Options{
+			CoverSNI: sni, Credential: credential, BinderLen: binderLen,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		h, err := ParseClientHello(wire)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+
+	if _, err := cover.validateClientHello(makeHello(credential, cover.Host, cover.BinderLen)); err != nil {
+		t.Fatalf("valid ClientHello rejected: %v", err)
+	}
+
+	shortCredential, err := k.Issue(1, mustCover(t, "www.google.com").TicketLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]*ClientHello{
+		"SNI":           makeHello(credential, "www.google.com", cover.BinderLen),
+		"ticket length": makeHello(shortCredential, cover.Host, cover.BinderLen),
+		"binder length": makeHello(credential, cover.Host, 32),
+	}
+	withoutCipher := makeHello(credential, cover.Host, cover.BinderLen)
+	for i, suite := range withoutCipher.CipherSuites {
+		if suite == cover.CipherSuite {
+			withoutCipher.CipherSuites = append(withoutCipher.CipherSuites[:i:i], withoutCipher.CipherSuites[i+1:]...)
+			break
+		}
+	}
+	cases["cipher suite"] = withoutCipher
+
+	for name, hello := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := cover.validateClientHello(hello); err == nil {
+				t.Fatal("mismatched ClientHello accepted")
+			}
+		})
+	}
+
+	if _, _, err := Client(nil, ClientConfig{
+		Pool: pool(t), Cover: cover, Credential: shortCredential,
+	}); err == nil {
+		t.Fatal("client accepted a credential with the wrong ticket length")
+	}
+}
+
+func TestServerRequiresSharedReplayCache(t *testing.T) {
+	_, err := Server(nil, ServerConfig{Cover: mustCover(t, "www.google.com")})
+	if err == nil {
+		t.Fatal("server accepted a nil replay cache")
+	}
+}
+
 func TestUnknownCoverIsRejected(t *testing.T) {
 	_, err := CoverFor("unmeasured.example")
 	if err == nil {

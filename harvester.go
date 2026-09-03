@@ -143,12 +143,18 @@ func (h *Harvester) Offer(rec []byte) (bool, error) {
 	}
 	h.pending = append(h.pending, clean)
 	h.pendingKeys[key] = struct{}{}
-	if len(h.pending) <= len(h.hellos) {
+	best, _ := largestBuild(h.pending)
+	if len(best) <= len(h.hellos) {
 		h.mu.Unlock()
 		return false, nil
 	}
-	h.hellos = h.pending
-	h.keys = h.pendingKeys
+	h.hellos = best
+	h.keys = map[string]struct{}{}
+	for _, r := range h.hellos {
+		if k, ok := contributionKey(r); ok {
+			h.keys[k] = struct{}{}
+		}
+	}
 	h.pending = nil
 	h.pendingKeys = map[string]struct{}{}
 	if len(h.hellos) > h.max {

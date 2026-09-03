@@ -13,9 +13,9 @@ var embeddedPool string
 // DefaultPool returns the compiled-in ClientHello records, exactly as
 // pool/chrome.hex holds them.
 //
-// Prefer LoadPool: this is the last of its three tiers, and the only one that
-// cannot be refreshed without shipping a binary. A built-in pool means the
-// transport works without provisioning, but it is a FALLBACK, not the plan.
+// Prefer LoadPool: this is its opt-in last tier, and the only one that cannot be
+// refreshed without shipping a binary. Production callers should provision a
+// device or config pool instead.
 // Every pooled hello is a snapshot of one Chrome version, so as Chrome moves
 // the pool turns from camouflage into a positive signal -- the uTLS
 // preset-staleness problem relocated rather than solved.

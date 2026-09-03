@@ -39,8 +39,7 @@ type ServerConfig struct {
 	// is never skipped on this path.
 	MaxAge time.Duration
 	// Replay spends tickets atomically. Duplicate tickets take the cover path.
-	// If nil, each Server call has a private cache and cannot catch replays
-	// across connections — lantern-box always sets one.
+	// It must be shared by every Server call using this TicketKey.
 	Replay *ReplayCache
 	Shaper Shaper
 }
@@ -59,6 +58,9 @@ func Client(raw net.Conn, cfg ClientConfig) (*Conn, *Credential, error) {
 	}
 	if cfg.Credential == nil {
 		return nil, nil, errors.New("twiddle: missing credential")
+	}
+	if len(cfg.Credential.Ticket) != cfg.Cover.TicketLen {
+		return nil, nil, fmt.Errorf("twiddle: credential ticket length %d does not match cover %d", len(cfg.Credential.Ticket), cfg.Cover.TicketLen)
 	}
 	pick, err := rand.Int(rand.Reader, bigLen(len(cfg.Pool)))
 	if err != nil {
@@ -129,11 +131,18 @@ func Server(raw net.Conn, cfg ServerConfig) (*Conn, error) {
 	if err := cfg.Cover.Valid(); err != nil {
 		return nil, err
 	}
+	if cfg.Replay == nil {
+		return nil, errors.New("twiddle: shared replay cache is required")
+	}
 	rec, err := readRecord(raw)
 	if err != nil {
 		return nil, ErrNotOurs
 	}
 	h, err := ParseClientHello(rec)
+	if err != nil {
+		return nil, ErrNotOurs
+	}
+	ticket, err := cfg.Cover.validateClientHello(h)
 	if err != nil {
 		return nil, ErrNotOurs
 	}
@@ -145,19 +154,7 @@ func Server(raw net.Conn, cfg ServerConfig) (*Conn, error) {
 	if err != nil {
 		return nil, ErrNotOurs
 	}
-	e := h.Find(ExtPreSharedKey)
-	if e == nil {
-		return nil, ErrNotOurs
-	}
-	ticket, _, _, err := parsePSK(e.Data)
-	if err != nil {
-		return nil, ErrNotOurs
-	}
-	replay := cfg.Replay
-	if replay == nil {
-		replay = NewReplayCache(1, maxAge)
-	}
-	if !replay.Consume(ticket) {
+	if !cfg.Replay.Consume(ticket) {
 		return nil, ErrNotOurs
 	}
 

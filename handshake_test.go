@@ -106,17 +106,21 @@ func TestServerRejectsUnauthenticated(t *testing.T) {
 	k := ticketKey(t)
 	other := ticketKey(t)
 	cover := mustCover(t, "www.microsoft.com")
-	badCred, _ := other.Issue(1, DefaultTicketLen)
+	badCred, _ := other.Issue(1, cover.TicketLen)
 
 	cases := map[string]func(net.Conn){
 		"garbage":        func(c net.Conn) { c.Write([]byte("not a tls record at all")) },
 		"bare TLS hello": func(c net.Conn) { c.Write(pool(t)[0]) },
 		"wrong ticket key": func(c net.Conn) {
-			w, _, _ := Twiddle(pool(t)[0], Options{Credential: badCred, BinderLen: 32})
+			w, _, _ := Twiddle(pool(t)[0], Options{
+				CoverSNI: cover.Host, Credential: badCred, BinderLen: cover.BinderLen,
+			})
 			c.Write(w)
 		},
 		"truncated": func(c net.Conn) {
-			w, _, _ := Twiddle(pool(t)[0], Options{Credential: badCred, BinderLen: 32})
+			w, _, _ := Twiddle(pool(t)[0], Options{
+				CoverSNI: cover.Host, Credential: badCred, BinderLen: cover.BinderLen,
+			})
 			c.Write(w[:40])
 		},
 	}
@@ -154,7 +158,8 @@ func TestServerRejectsUnauthenticated(t *testing.T) {
 // TestOpeningLooksLikeTLS checks the bytes a censor actually sees.
 func TestOpeningLooksLikeTLS(t *testing.T) {
 	k := ticketKey(t)
-	cred, _ := k.Issue(1, DefaultTicketLen)
+	cover := mustCover(t, "www.microsoft.com")
+	cred, _ := k.Issue(1, cover.TicketLen)
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
 	defer ln.Close()
 
@@ -175,7 +180,7 @@ func TestOpeningLooksLikeTLS(t *testing.T) {
 		captured <- seen
 	}()
 	raw, _ := net.Dial("tcp", ln.Addr().String())
-	go Client(raw, ClientConfig{Pool: pool(t), Cover: mustCover(t, "www.microsoft.com"), Credential: cred})
+	go Client(raw, ClientConfig{Pool: pool(t), Cover: cover, Credential: cred})
 	first := <-captured
 
 	if len(first) < 5 {

@@ -51,8 +51,9 @@ func (o Origin) String() string {
 	return "unknown"
 }
 
-// Sources names where a pool may be read from. Every field may be empty;
-// LoadPool falls through to the next source, and to the embedded pool last.
+// Sources names where a pool may be read from. LoadPool falls through from the
+// device source to config. The embedded pool is used last only when explicitly
+// enabled.
 type Sources struct {
 	// Device is the path to a pool written by whatever on this device taps
 	// outbound TLS. Entries must already be sanitised -- see Sanitize.
@@ -81,7 +82,8 @@ type Pool struct {
 	Skipped []error
 }
 
-// LoadPool returns the best usable pool: device, else config, else embedded.
+// LoadPool returns the best usable pool: device, else config, else the embedded
+// pool when AllowEmbedded is true.
 //
 // Sources are never merged. A real browser install emits hellos from exactly
 // one build, so a pool blending a device-tapped Chrome 152 hello with a

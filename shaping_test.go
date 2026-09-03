@@ -136,10 +136,12 @@ func TestShapedWireLengths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer cc.Close()
 	sc := <-srv
 	if sc == nil {
 		t.Fatal("server side failed")
 	}
+	defer sc.Close()
 
 	lens := make(chan int, 256)
 	go func() {
@@ -157,8 +159,6 @@ func TestShapedWireLengths(t *testing.T) {
 			lens <- n
 		}
 	}()
-	_ = cc
-
 	payload := make([]byte, 4000) // an MTU-ish response: the case that broke before
 	rand.Read(payload)
 	if _, err := sc.Write(payload); err != nil {

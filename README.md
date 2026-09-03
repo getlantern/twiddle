@@ -45,14 +45,14 @@ field only some browser installs send — BoringSSL's `server_padding` (`0x12e0`
 
 ## Where the hellos come from
 
-The pool is **data read off disk**, not a compiled-in constant, and `LoadPool` tries three sources in
-descending order of preference:
+`LoadPool` tries device and config sources in descending order of preference. Its compiled-in snapshot is
+available only through the explicit `AllowEmbedded` test fallback:
 
 | Source | Why it ranks here |
 |---|---|
 | **device** — tapped from this device's own outbound TLS | The only source that cannot go stale: by construction it is what the browser on *this* device emits right now, from the version installed here, with this device's field-trial state |
 | **config** — delivered by the config service | Refreshable without shipping a binary |
-| **embedded** — `pool/chrome.hex` | Works without provisioning; decays as Chrome moves |
+| **embedded** — `pool/chrome.hex` | Opt-in for tests only; already stale as Chrome moves |
 
 Sources are never merged, and an incoherent source is partitioned by build with the majority winning. A real
 browser install emits hellos from exactly one build, so a pool blending two would have this client
@@ -112,7 +112,7 @@ traffic over the AEAD record layer, and `go test` covers it over a real socket. 
 | `serverhello.go` | ServerHello synthesis at the measured 1210 B shape |
 | `conn.go` | AEAD record layer framed as `application_data` |
 | `shaping.go` | record segmentation and padding to the measured browsing profile |
-| `source.go`, `pool.go` | hello sourcing: device tap, config, embedded fallback |
+| `source.go`, `pool.go` | hello sourcing: device tap, config, opt-in test fallback |
 | `harvest/` | the measurement tooling that established every number above |
 
 Not here yet, and both live on the consumer side rather than in this module:
