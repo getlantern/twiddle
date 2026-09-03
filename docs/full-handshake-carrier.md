@@ -101,85 +101,139 @@ Three consequences:
    google coalesce all four. `ServerRemainder []int` already models this — the client must read one
    record per entry (a fixed single read is the bug #1 hit).
 
-## The hard part: anti-replay without a ticket
+## The carrier: where does the ticket go?
 
-This is the piece that needs a decision, not code. Everything else is mechanical.
+### First, a correction
 
-The replay gate landed in #1 keys on `clientID` and `Issued`, **both of which come out of the
-ticket's authenticated plaintext**. A PSK-less hello has neither. The carrier therefore needs its own
-anti-replay story, and it must satisfy the lesson that gate was rebuilt around: *eviction is only
-sound when the thing evicted is already rejected by validation.*
+An earlier draft of this document proposed putting `AEAD(k_server, clientID ‖ timestamp)` in
+`ClientHello.random`. **That is impossible.** `TicketKey` never leaves the egress (`auth.go`), so a client
+cannot encrypt under it. In the resumption path the client does not encrypt anything — it presents a
+ciphertext *the server minted for it*. The direction was backwards.
 
-### Proposed construction
+Correcting it shrinks the problem. Provisioned clients always hold a `Credential{Ticket, PSK}`; that is why
+every hello is a resumption hello in the first place. So the question was never "authenticate with no
+credential." It is:
 
-The README already names the carrier: `ClientHello.random` carries the MAC, `key_share` supplies the
-ephemeral. 32 bytes of `random` to work with. Mirror the ticket's own shape:
+> **Where does the ticket go, if not in `pre_shared_key`?**
+
+And with the ticket still present, `clientID` and `Issued` come out of `TicketKey.Open` exactly as they do
+today — so **the merged `ReplayCache` applies unchanged**, and this document's former "hard part" does not
+exist.
+
+### Leading candidate: the GREASE ECH payload
+
+`harvest/testdata/arrival-chrome152.log` measured Chrome 152's ECH extension at **186/218/250/282 bytes**
+across 7 hellos, redrawn per connection — a payload of 144/176/208/240 after the 42-byte header
+(`config_type ‖ kdf ‖ aead ‖ config_id ‖ enc[32]` plus the two length prefixes). `echGREASELengths` in
+`twiddle.go` already models exactly this, and `rerandECHGrease` already overwrites the payload with fresh
+random bytes every connection.
+
+That payload is **the one field in the hello where 144–240 uniform bytes are precisely what belongs.** A
+ticket is AEAD ciphertext. It is the same object.
 
 ```
-random = AEAD(k_server, nonce, plaintext = clientID ‖ timestamp, aad = key_share ‖ cover_sni)
-         ~ 8B nonce + 8B plaintext + 16B tag = 32B
+full-handshake hello:
+  no pre_shared_key                      <- looks like a full handshake, because it is one
+  ECH payload  = ticket ‖ random padding <- padded to the drawn Chrome bucket
+  random       = HMAC(binderKey(psk), hello with random zeroed)
+  key_share    = real ephemeral          <- unchanged
 ```
 
-Why this shape:
+Why each piece:
 
-- **Server-key encrypted, like the ticket.** The egress decrypts without knowing which client first,
-  so there is no O(clients) trial-verification and no per-client lookup.
-- **No linkable identifier on the wire.** A plaintext `clientID` would let a censor correlate every
-  connection from one client. Ciphertext under a fresh nonce is uniform to an observer, which is also
-  what `random` must look like.
-- **`key_share` as AAD binds the ephemeral for free**, preventing substitution without spending bytes.
-- **The freshness window can be SHORT.** There is no ticket lifetime to respect, so a ±30–60 s window
-  is enough. That makes the replay set O(connections within the window) instead of O(connections
-  within 24 h) — and, critically, the window *is* the whole horizon, so the set cannot forget
-  anything still valid. That is the property the ticket-keyed gate had to be redesigned to get.
+- **Ticket length becomes free.** In the resumption path `TicketLen` is a hard fidelity parameter because
+  the ticket sets the emitted hello size (`auth.go`: cloudflare 176 → 1711 B). Inside the ECH payload it is
+  invisible; only the *payload* length is observable, and that is drawn from Chrome's buckets. So fix the
+  full-path ticket at **144 bytes** — it fits the smallest bucket, so every bucket stays reachable — and pad
+  with random bytes to whatever length `rerandECHGrease` drew. Length variation stays exactly Chrome's.
+- **`random` takes over the binder's job.** The binder lives in `pre_shared_key` and dies with it. A
+  32-byte HMAC keyed from the psk fits `random` exactly, and 32 uniform bytes is what `random` is. Same
+  "authenticate over the final byte layout" discipline: compute it last, over the marshalled hello with
+  `random` zeroed.
+- **Nothing new is provisioned.** No new key material, no lantern-cloud or lantern-box change. The client
+  already holds the credential; the server already holds the ticket key.
 
-Anti-replay is then: verify the AEAD, check `|now − timestamp| < window`, and dedup on the
-`key_share` (32 uniformly random bytes, fresh per connection, a better key than `random`) within the
-window.
+### The objection, which is real
 
-### Open questions
+`docs/ech.md` concludes: *"ship ECH, and keep the ability to stop shipping it without shipping anything"* —
+because the pool is data, a device tap from a browser that does not send ECH silently produces a non-ECH
+pool, and that is the designed escape hatch if China ever blocks `0xfe0d`.
 
-1. **Byte budget.** 8B nonce + 8B plaintext + 16B tag = 32B exactly, leaving ~4B for clientID and ~4B
-   for the timestamp. Is a 4-byte clientID enough for the population? Is a 4-byte second-resolution
-   timestamp enough range? Alternative: shrink the tag to 12B and take 4 more bytes of plaintext —
-   96-bit authentication may be acceptable here since forging only yields a connection attempt, but
-   that is a judgement call.
-2. **Clock skew.** The window depends on the client's clock. Mobile clocks are usually fine; decide
-   the tolerance and what happens to a client with a badly wrong clock (it fails to the cover path,
-   which is safe but invisible to the user).
-3. **Where credential rotation lives.** It currently rides a NewSessionTicket-shaped record — but
-   cloudflare and google send **no** unprompted post-handshake records at all, so on those covers
-   that record has no counterpart. A full-handshake connection has no ticket to rotate anyway; decide
-   whether the full path rotates at all, or only issues on first contact.
-4. **Mix policy — and it is not a ratio.** Per the reframing above, the target is not 4%. It is that a
-   censor watching this client and this egress has *seen the full handshake that the resumption
-   continues*. That makes the first connection to an egress full (there is no ticket yet anyway) and
-   later ones resumed, with no dice roll.
-   The real question is the **re-full cadence**, because the censor's flow history is finite and the
-   client's context changes: a reconnection a week later, from a different network, after the egress IP
-   rotated, has no observable predecessor even though we hold a valid ticket. Some trigger — new local
-   address, new egress IP, elapsed time — has to force a fresh full handshake. Note the resulting ratio
-   is likely *far above* 4% (a long-lived muxed tunnel opens few outer connections, so one full per
-   handful of resumed), and that is the correct outcome, not a miss: what a censor can check is whether
-   the predecessor exists, not whether we hit a population average.
+Putting authentication in the ECH payload **couples the full-handshake path to a hedge built to be
+dropped.** If the hedge fires, the carrier vanishes.
+
+The answer is that this is degradation, not breakage, and there is already a gate for it:
+`CanEmitFullHandshake()` must additionally require an ECH extension with a large enough payload. A pool
+without ECH falls back to the resumption path — which is exactly where we are today, so the floor is the
+status quo. Say this out loud in the code, because a future reader will otherwise re-derive the objection
+and assume it was missed.
+
+### Fallback candidate: ECDH to a server static key
+
+If the ECH coupling proves unacceptable, the REALITY-style construction works:
+
+```
+k_open = HKDF(ECDH(client_eph_priv, server_static_pub))
+random = AEAD(k_open, nonce = KDF(client_eph_pub), clientID ‖ timestamp ‖ psk_proof)
+```
+
+The server does **one** X25519 against its static private key to recover the opener key — no per-client
+trial, no O(clients) scan. `docs/uniform-ephemeral.md` warns that "the client never performs a DH," but that
+warning is about placing a raw curve point in a *ciphertext-shaped* field. Here the curve point goes in
+`key_share`, where `auth.go` already says "a curve point is precisely what belongs and carries no anomaly at
+all" — and the client already does exactly this DH today.
+
+Costs, and why it is second choice:
+
+- A new long-term server keypair, provisioned to every client — a lantern-cloud (`pcfg`) and lantern-box
+  change, i.e. cross-repo work the ECH carrier does not need.
+- No ticket on the wire, so `clientID`/`Issued` no longer come from `TicketKey.Open` and the replay gate
+  **does** need the separate short-window construction this document previously described. Keep that
+  sketch in the git history for this case.
+- Forward secrecy is unchanged for traffic (session keys still come from the ephemeral-ephemeral ECDH plus
+  psk), but a later compromise of the static key retroactively reveals the `clientID` in past openings.
+  The ECH carrier has no equivalent exposure.
+
+## Open questions
+
+1. **Does a real Chrome in-region send GREASE ECH to our cover hosts, or real ECH?** The carrier assumes
+   GREASE. `docs/ech.md` argues in-region it is GREASE — China prevents real ECH indirectly by censoring
+   encrypted DNS resolvers, so no ECHConfig is fetched — and `arrival-chrome152.log` measured GREASE 7/7 to
+   a bare IP with no DNS. But that capture *could not* have produced real ECH. **Measure the DNS-enabled
+   case** before building: a Chrome with secure DNS on, against `www.cloudflare.com`, will fetch the HTTPS
+   RR and send real ECH, whose payload length is set by the encrypted inner hello rather than by
+   `echGREASELengths`. If in-region clients would send real ECH, the payload-length model is wrong for them.
+   This is the one measurement that can invalidate the carrier, so run it first.
+2. **Re-full cadence.** See "Mix policy" reasoning above: the censor's flow history is finite and the
+   client's context changes, so some trigger — new local address, new egress IP, elapsed time — has to
+   force a fresh full handshake rather than resuming forever off one observed predecessor.
+3. **Where credential rotation lives.** It currently rides a NewSessionTicket-shaped record, but cloudflare
+   and google send **no** unprompted post-handshake records at all, so on those covers that record has no
+   counterpart. Unchanged by this work, but it lands in the same code.
+4. **Full-path ticket length.** 144 bytes is proposed so every ECH bucket stays reachable. Confirm
+   `MinTicketLen` (76) leaves enough padding entropy, and decide whether the server should accept only 144
+   or any length that decrypts.
 
 ## Implementation sketch
 
-1. `SetRandomAuth` / `VerifyRandomAuth` in `auth.go`, mirroring `SetTicketAuth` / `VerifyTicketAuth`.
-   **Ordering matters:** the random binds `key_share`, so it must be written *after* `SetKeyShare` —
-   the same "authenticate over the final byte layout" constraint the binder has. The pipeline becomes
-   `SetSNI → Rerandomize → Shuffle → SetKeyShare → SetRandomAuth`.
-   Note `Rerandomize` currently overwrites `h.Random`, so the auth step must follow it.
-2. Branch `validateClientHello` (`cover.go`) and `Server` (`handshake.go`) on whether
-   `pre_shared_key` is present, instead of requiring it.
-3. A second replay gate keyed on `key_share` within the freshness window. Reuse the horizon-soundness
-   argument from `replay.go`; do not reuse its client-keyed structure, which depends on ticket fields.
-4. Server emission: `ServerHelloFullLen`, then CCS, then one record per `FullRemainder` entry,
-   jittered within `FullRemainderJitter`. Client: one read per entry.
-5. Gate on `CanEmitFullHandshake()` — an egress with no probed full profile must not offer the
-   carrier. Emitting a guessed certificate flight is worse than only offering the resumed path.
-6. Extend `cover_test.go`'s oracle. Note it cannot pin `FullRemainder` to a literal (it is probed and
-   jitters); pin the *structure* instead — ServerHello length, record count, plausible range.
+1. `SetECHTicketAuth` / `VerifyECHTicketAuth` in `auth.go`, mirroring `SetTicketAuth` / `VerifyTicketAuth`:
+   write the ticket into the ECH payload padded to the drawn bucket, then HMAC the marshalled hello with
+   `random` zeroed and write the result into `random`.
+   **Ordering matters,** the same rule the binder follows: the MAC covers the final byte layout, so it is
+   computed last. The pipeline becomes `SetSNI → Rerandomize → Shuffle → SetKeyShare → SetECHTicketAuth`.
+   Note `Rerandomize` overwrites `h.Random` (`twiddle.go:82`) *and* redraws the ECH payload
+   (`rerandECHGrease`), so both writes must follow it.
+2. Branch `validateClientHello` (`cover.go:155`) and `Server` (`handshake.go`) on whether `pre_shared_key`
+   is present, instead of requiring it. The full path reads the ticket from ECH and verifies the `random`
+   MAC; everything downstream — `TicketKey.Open`, `ReplayCache.Consume`, `DeriveSession` — is unchanged.
+3. Extend `CanEmitFullHandshake()` to also require an ECH extension whose payload can hold the ticket. A
+   pool without ECH falls back to resumption; say why in the comment (see "The objection" above).
+4. Server emission: `ServerHelloFullLen`, then CCS, then one record per `FullRemainder` entry, jittered
+   within `FullRemainderJitter`. Client: one read per entry.
+5. Extend `cover_test.go`'s oracle. It cannot pin `FullRemainder` to a literal (probed, and it jitters);
+   pin the *structure* — ServerHello length, record count, plausible range.
+6. Mix policy: first contact to an egress is full, later connections resume, plus the re-full trigger from
+   open question 2.
 
 ## Traps worth knowing before starting
 
