@@ -83,6 +83,7 @@ harvest/            capture and measurement tooling
   cmd/flight/       measure the server-side record profile of real TLS 1.3 servers
   cmd/tapproxy/     byte-tap in front of an upstream TLS server (0-RTT measurement)
   cmd/arrival/      how the opening flight is packetised: TCP writes, QUIC datagrams
+  cmd/postflight/   post-handshake and teardown records on a resumed connection
   cmd/sweep/        repeated captures for per-connection variance
   analyze.py        compare full vs resumption hellos
   compare_arms.py   compare capture arms (headless vs headful, profile state)
