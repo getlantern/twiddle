@@ -22,27 +22,27 @@ var ErrNotOurs = errors.New("twiddle: connection did not authenticate")
 type ClientConfig struct {
 	// Pool holds harvested ClientHello records. One is chosen per connection.
 	Pool [][]byte
-	// CoverSNI is the domain this egress masquerades as.
-	CoverSNI string
+	// Cover is the impersonated identity. Unknown or partial profiles are
+	// rejected: a microsoft SNI with a 32-byte binder is a different identity.
+	Cover CoverProfile
 	// Credential is the ticket and psk to present. Replaced after each
-	// connection with the one the server issues in its flight.
+	// connection with the one the server issues as a post-handshake ticket.
 	Credential *Credential
-	BinderLen  int
 	Shaper     Shaper
 }
 
 // ServerConfig is what an egress needs to accept one.
 type ServerConfig struct {
 	TicketKey *TicketKey
-	MaxAge    time.Duration
-	// TicketLen must be stable: a real server's ticket format does not vary.
-	TicketLen int
-	// PSKFirst places pre_shared_key before the other ServerHello extensions.
-	// Real servers differ but are individually consistent -- google and
-	// cloudflare put it first, microsoft, amazon and wikipedia last -- so this
-	// should be stable for a given cover identity.
-	PSKFirst bool
-	Shaper   Shaper
+	Cover     CoverProfile
+	// MaxAge bounds ticket lifetime. Zero means DefaultTicketMaxAge; the check
+	// is never skipped on this path.
+	MaxAge time.Duration
+	// Replay spends tickets atomically. Duplicate tickets take the cover path.
+	// If nil, each Server call has a private cache and cannot catch replays
+	// across connections — lantern-box always sets one.
+	Replay *ReplayCache
+	Shaper Shaper
 }
 
 // Client opens a twiddle connection over raw.
@@ -54,19 +54,21 @@ func Client(raw net.Conn, cfg ClientConfig) (*Conn, *Credential, error) {
 	if len(cfg.Pool) == 0 {
 		return nil, nil, errors.New("twiddle: empty hello pool")
 	}
+	if err := cfg.Cover.Valid(); err != nil {
+		return nil, nil, err
+	}
+	if cfg.Credential == nil {
+		return nil, nil, errors.New("twiddle: missing credential")
+	}
 	pick, err := rand.Int(rand.Reader, bigLen(len(cfg.Pool)))
 	if err != nil {
 		return nil, nil, err
 	}
-	binderLen := cfg.BinderLen
-	if binderLen == 0 {
-		binderLen = 32
-	}
 
 	wire, eph, err := Twiddle(cfg.Pool[pick.Int64()], Options{
-		CoverSNI:   cfg.CoverSNI,
+		CoverSNI:   cfg.Cover.Host,
 		Credential: cfg.Credential,
-		BinderLen:  binderLen,
+		BinderLen:  cfg.Cover.BinderLen,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -91,7 +93,7 @@ func Client(raw net.Conn, cfg ClientConfig) (*Conn, *Credential, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	sess, err := DeriveSession(cfg.Credential.PSK[:], shared, TLS_AES_128_GCM_SHA256)
+	sess, err := DeriveSession(cfg.Credential.PSK[:], shared, cfg.Cover.CipherSuite)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -100,12 +102,23 @@ func Client(raw net.Conn, cfg ClientConfig) (*Conn, *Credential, error) {
 		return nil, nil, err
 	}
 
-	// The flight carries the next credential, exactly as NewSessionTicket does.
-	next, err := readFlight(conn)
-	if err != nil {
+	// Server EncryptedExtensions+Finished stand-in, sized to the measured
+	// remainder of the first server burst — not the burst total.
+	if _, _, err := conn.consumeRecord(); err != nil {
 		return nil, nil, err
 	}
 	if _, err := raw.Write(ChangeCipherSpec()); err != nil {
+		return nil, nil, err
+	}
+	if err := conn.writeSized(contentHandshake, nil, cfg.Cover.ClientEncryptedWire()); err != nil {
+		return nil, nil, err
+	}
+
+	// NewSessionTicket arrives after both Finisheds, matching real TLS 1.3
+	// timing. Rotating inside the opening burst was how the credential padded
+	// that burst to the wrong size.
+	next, err := readTickets(conn)
+	if err != nil {
 		return nil, nil, err
 	}
 	return conn, next, nil
@@ -113,6 +126,9 @@ func Client(raw net.Conn, cfg ClientConfig) (*Conn, *Credential, error) {
 
 // Server accepts a twiddle connection, or returns ErrNotOurs.
 func Server(raw net.Conn, cfg ServerConfig) (*Conn, error) {
+	if err := cfg.Cover.Valid(); err != nil {
+		return nil, err
+	}
 	rec, err := readRecord(raw)
 	if err != nil {
 		return nil, ErrNotOurs
@@ -121,8 +137,27 @@ func Server(raw net.Conn, cfg ServerConfig) (*Conn, error) {
 	if err != nil {
 		return nil, ErrNotOurs
 	}
-	res, err := VerifyTicketAuth(h, cfg.TicketKey, cfg.MaxAge)
+	maxAge := cfg.MaxAge
+	if maxAge <= 0 {
+		maxAge = DefaultTicketMaxAge
+	}
+	res, err := VerifyTicketAuth(h, cfg.TicketKey, maxAge)
 	if err != nil {
+		return nil, ErrNotOurs
+	}
+	e := h.Find(ExtPreSharedKey)
+	if e == nil {
+		return nil, ErrNotOurs
+	}
+	ticket, _, _, err := parsePSK(e.Data)
+	if err != nil {
+		return nil, ErrNotOurs
+	}
+	replay := cfg.Replay
+	if replay == nil {
+		replay = NewReplayCache(1, maxAge)
+	}
+	if !replay.Consume(ticket) {
 		return nil, ErrNotOurs
 	}
 
@@ -132,9 +167,9 @@ func Server(raw net.Conn, cfg ServerConfig) (*Conn, error) {
 	}
 	sh, err := SynthesizeServerHello(ServerHelloParams{
 		SessionIDEcho:   h.SessionID,
-		CipherSuite:     TLS_AES_128_GCM_SHA256,
+		CipherSuite:     cfg.Cover.CipherSuite,
 		ServerEphemeral: priv.PublicKey(),
-		PSKFirst:        cfg.PSKFirst,
+		PSKFirst:        cfg.Cover.PSKFirst,
 	})
 	if err != nil {
 		return nil, err
@@ -150,7 +185,7 @@ func Server(raw net.Conn, cfg ServerConfig) (*Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	sess, err := DeriveSession(res.PSK[:], shared, TLS_AES_128_GCM_SHA256)
+	sess, err := DeriveSession(res.PSK[:], shared, cfg.Cover.CipherSuite)
 	if err != nil {
 		return nil, err
 	}
@@ -159,55 +194,47 @@ func Server(raw net.Conn, cfg ServerConfig) (*Conn, error) {
 		return nil, err
 	}
 
-	ticketLen := cfg.TicketLen
-	if ticketLen == 0 {
-		ticketLen = DefaultTicketLen
-	}
-	next, err := cfg.TicketKey.Issue(res.ClientID, ticketLen)
-	if err != nil {
-		return nil, err
-	}
-	if err := writeFlight(conn, next); err != nil {
+	if err := conn.writeSized(contentHandshake, nil, cfg.Cover.ServerEncryptedWire()); err != nil {
 		return nil, err
 	}
 	if _, err := readRecord(raw); err != nil { // client ChangeCipherSpec
 		return nil, err
 	}
+	if _, _, err := conn.consumeRecord(); err != nil { // client Finished stand-in
+		return nil, err
+	}
+
+	next, err := cfg.TicketKey.Issue(res.ClientID, cfg.Cover.TicketLen)
+	if err != nil {
+		return nil, err
+	}
+	if err := writeTickets(conn, next); err != nil {
+		return nil, err
+	}
 	return conn, nil
 }
 
-// writeFlight sends the encrypted records standing in for the certificate
-// flight. A resumed handshake's flight was measured at a near-constant
-// 1291-1333 bytes across five real servers, so that is the shape to hit -- and
-// the next credential rides inside it for free.
-func writeFlight(c *Conn, next *Credential) error {
+// sessionTicketWire is a plausible NewSessionTicket record. It is sent after
+// both Finisheds, so it is outside the Wb=3 opening window the size bug was
+// about. Real later bursts also carry application data; matching that volume
+// is a later shaping concern.
+const sessionTicketWire = 370
+
+func writeTickets(c *Conn, next *Credential) error {
 	body := make([]byte, 0, 2+len(next.Ticket)+32)
 	body = appendU16(body, uint16(len(next.Ticket)))
 	body = append(body, next.Ticket...)
 	body = append(body, next.PSK[:]...)
-
-	target := 1291 + mrand(43)
-	if len(body) < target {
-		pad := make([]byte, target-len(body))
-		if _, err := rand.Read(pad); err != nil {
-			return err
-		}
-		body = append(body, pad...)
-	}
-	var hdr [2]byte
-	binary.BigEndian.PutUint16(hdr[:], uint16(len(body)))
-	_, err := c.Write(append(hdr[:], body...))
-	return err
+	return c.writeSized(contentHandshake, body, sessionTicketWire)
 }
 
-func readFlight(c *Conn) (*Credential, error) {
-	var hdr [2]byte
-	if _, err := io.ReadFull(c, hdr[:]); err != nil {
+func readTickets(c *Conn) (*Credential, error) {
+	typ, body, err := c.consumeRecord()
+	if err != nil {
 		return nil, err
 	}
-	body := make([]byte, binary.BigEndian.Uint16(hdr[:]))
-	if _, err := io.ReadFull(c, body); err != nil {
-		return nil, err
+	if typ != contentHandshake && typ != contentAppData {
+		return nil, errMalformed
 	}
 	if len(body) < 2 {
 		return nil, errMalformed
@@ -240,12 +267,3 @@ func readRecord(r io.Reader) ([]byte, error) {
 }
 
 func bigLen(n int) *big.Int { return big.NewInt(int64(n)) }
-
-// mrand returns a uniform int in [0,n) for shaping jitter.
-func mrand(n int) int {
-	v, err := rand.Int(rand.Reader, big.NewInt(int64(n)))
-	if err != nil {
-		return 0
-	}
-	return int(v.Int64())
-}

@@ -221,6 +221,61 @@ func (c *Conn) writeRecord(typ byte, payload []byte, padTo int) error {
 	return err
 }
 
+// writeSized emits one application_data record of exactly wireLen bytes,
+// bypassing the browsing shaper. The opening EncryptedExtensions/Finished
+// stand-ins have to hit the measured remainder (64 or 106 B), not a 1395-byte
+// browsing mode.
+func (c *Conn) writeSized(typ byte, payload []byte, wireLen int) error {
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	padTo := wireLen - recordHeaderLen - c.send.Overhead()
+	if padTo < len(payload)+1 {
+		return fmt.Errorf("twiddle: wire length %d too small for %d-byte payload", wireLen, len(payload))
+	}
+	if padTo > maxInner {
+		return fmt.Errorf("twiddle: wire length %d exceeds max inner", wireLen)
+	}
+	return c.writeRecord(typ, payload, padTo)
+}
+
+// consumeRecord decrypts the next record and returns its inner content type
+// and payload, without queuing application data. Handshake-shaped opening
+// records are consumed this way so they never mix with tunnel bytes.
+func (c *Conn) consumeRecord() (typ byte, payload []byte, err error) {
+	c.rmu.Lock()
+	defer c.rmu.Unlock()
+	return c.decryptRecord()
+}
+
+func (c *Conn) decryptRecord() (byte, []byte, error) {
+	var hdr [recordHeaderLen]byte
+	if _, err := io.ReadFull(c.raw, hdr[:]); err != nil {
+		return 0, nil, err
+	}
+	n := int(binary.BigEndian.Uint16(hdr[3:5]))
+	if n > maxCiphertext || n < c.recv.Overhead() {
+		return 0, nil, fmt.Errorf("twiddle: implausible record length %d", n)
+	}
+	buf := make([]byte, n)
+	if _, err := io.ReadFull(c.raw, buf); err != nil {
+		return 0, nil, err
+	}
+	inner, err := c.recv.Open(buf[:0], nonceFor(c.recvIV, c.recvSeq), buf, hdr[:])
+	if err != nil {
+		return 0, nil, errors.New("twiddle: record failed to decrypt")
+	}
+	c.recvSeq++
+
+	i := len(inner) - 1
+	for i >= 0 && inner[i] == 0 {
+		i--
+	}
+	if i < 0 {
+		return 0, nil, errors.New("twiddle: record has no content type")
+	}
+	return inner[i], inner[:i], nil
+}
+
 func (c *Conn) Read(b []byte) (int, error) {
 	c.rmu.Lock()
 	defer c.rmu.Unlock()
@@ -241,35 +296,13 @@ func (c *Conn) Read(b []byte) (int, error) {
 }
 
 func (c *Conn) readRecord() error {
-	var hdr [recordHeaderLen]byte
-	if _, err := io.ReadFull(c.raw, hdr[:]); err != nil {
-		return err
-	}
-	n := int(binary.BigEndian.Uint16(hdr[3:5]))
-	if n > maxCiphertext || n < c.recv.Overhead() {
-		return fmt.Errorf("twiddle: implausible record length %d", n)
-	}
-	buf := make([]byte, n)
-	if _, err := io.ReadFull(c.raw, buf); err != nil {
-		return err
-	}
-	inner, err := c.recv.Open(buf[:0], nonceFor(c.recvIV, c.recvSeq), buf, hdr[:])
+	typ, payload, err := c.decryptRecord()
 	if err != nil {
-		return errors.New("twiddle: record failed to decrypt")
+		return err
 	}
-	c.recvSeq++
-
-	// strip zero padding, then the content type -- TLS 1.3's own layout
-	i := len(inner) - 1
-	for i >= 0 && inner[i] == 0 {
-		i--
-	}
-	if i < 0 {
-		return errors.New("twiddle: record has no content type")
-	}
-	switch inner[i] {
+	switch typ {
 	case contentAppData:
-		c.pending = append(c.pending, inner[:i]...)
+		c.pending = append(c.pending, payload...)
 	case contentAlert:
 		return io.EOF
 	default:

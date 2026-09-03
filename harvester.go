@@ -38,9 +38,11 @@ type Harvester struct {
 	path string
 	max  int
 
-	mu     sync.Mutex
-	hellos [][]byte
-	keys   map[string]struct{}
+	mu          sync.Mutex
+	hellos      [][]byte
+	keys        map[string]struct{}
+	pending     [][]byte
+	pendingKeys map[string]struct{}
 }
 
 // NewHarvester opens or creates the device pool at path.
@@ -52,7 +54,7 @@ func NewHarvester(path string, max int) *Harvester {
 	if max <= 0 {
 		max = DefaultHarvestMax
 	}
-	h := &Harvester{path: path, max: max, keys: map[string]struct{}{}}
+	h := &Harvester{path: path, max: max, keys: map[string]struct{}{}, pendingKeys: map[string]struct{}{}}
 	existing, _ := readPoolFile(path)
 	for _, rec := range existing {
 		if len(h.hellos) >= max {
@@ -101,26 +103,61 @@ func (h *Harvester) Offer(rec []byte) (bool, error) {
 		h.mu.Unlock()
 		return false, nil
 	}
-	// Keep the pool to one browser build. A device that just auto-updated Chrome
-	// will offer hellos from the new build while the file still holds the old
-	// one; appending both would have this client alternating fingerprints
-	// between connections. Admitting only what matches the majority lets the
-	// new build take over once it outnumbers the old, and LoadPool partitions
-	// on read as a backstop.
-	candidate := append(append([][]byte(nil), h.hellos...), clean)
-	best, _ := largestBuild(candidate)
-	if len(h.hellos) > 0 && !containsRecord(best, clean) {
+	// Keep the emit pool to one browser build. A device that just auto-updated
+	// Chrome will offer hellos from the new build while the file still holds
+	// the old one; appending both would have this client alternating
+	// fingerprints between connections.
+	//
+	// Rejecting the minority outright was wrong: after two old-build hellos,
+	// every new-build sample was a 1-vs-2 minority, so the new build could
+	// never become the majority. Count minority samples aside, and switch the
+	// emit pool once they outnumber it.
+	newFP := recordBuild(clean)
+	curFP := ""
+	if len(h.hellos) > 0 {
+		curFP = recordBuild(h.hellos[0])
+	}
+	if len(h.hellos) == 0 || newFP == curFP {
+		h.hellos = append(h.hellos, clean)
+		h.keys[key] = struct{}{}
+		if len(h.hellos) > h.max {
+			h.hellos = h.hellos[len(h.hellos)-h.max:]
+			h.keys = map[string]struct{}{}
+			for _, r := range h.hellos {
+				if k, ok := contributionKey(r); ok {
+					h.keys[k] = struct{}{}
+				}
+			}
+		}
+		snapshot := append([][]byte(nil), h.hellos...)
+		h.mu.Unlock()
+		if err := writePoolFile(h.path, snapshot); err != nil {
+			return true, err
+		}
+		return true, nil
+	}
+
+	if _, dup := h.pendingKeys[key]; dup {
 		h.mu.Unlock()
 		return false, nil
 	}
-	h.hellos = best
+	h.pending = append(h.pending, clean)
+	h.pendingKeys[key] = struct{}{}
+	if len(h.pending) <= len(h.hellos) {
+		h.mu.Unlock()
+		return false, nil
+	}
+	h.hellos = h.pending
+	h.keys = h.pendingKeys
+	h.pending = nil
+	h.pendingKeys = map[string]struct{}{}
 	if len(h.hellos) > h.max {
 		h.hellos = h.hellos[len(h.hellos)-h.max:]
-	}
-	h.keys = map[string]struct{}{}
-	for _, r := range h.hellos {
-		if k, ok := contributionKey(r); ok {
-			h.keys[k] = struct{}{}
+		h.keys = map[string]struct{}{}
+		for _, r := range h.hellos {
+			if k, ok := contributionKey(r); ok {
+				h.keys[k] = struct{}{}
+			}
 		}
 	}
 	snapshot := append([][]byte(nil), h.hellos...)
@@ -139,14 +176,12 @@ func (h *Harvester) Len() int {
 	return len(h.hellos)
 }
 
-func containsRecord(set [][]byte, rec []byte) bool {
-	want := hex.EncodeToString(rec)
-	for _, r := range set {
-		if hex.EncodeToString(r) == want {
-			return true
-		}
+func recordBuild(rec []byte) string {
+	h, err := ParseClientHello(rec)
+	if err != nil {
+		return ""
 	}
-	return false
+	return h.fingerprintIgnoringECHLength()
 }
 
 // contributionKey identifies what a pool entry adds that the emitter cannot

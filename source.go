@@ -65,6 +65,10 @@ type Sources struct {
 	// service that delivers hellos in its JSON body and one that drops them in a
 	// file are the same tier of trust and the same staleness risk.
 	ConfigInline string
+	// AllowEmbedded enables the compiled-in Chrome snapshot. Censor-facing
+	// deployments must leave this false: the snapshot already reproduces no
+	// Chrome that exists, and falling back to it is emitting a fingerprint.
+	AllowEmbedded bool
 }
 
 // Pool is a set of harvested hellos and a record of where they came from.
@@ -121,6 +125,10 @@ func LoadPool(s Sources) (*Pool, error) {
 				src.origin, len(best), dropped))
 		}
 		return &Pool{Hellos: best, Origin: src.origin, Skipped: skipped}, nil
+	}
+
+	if !s.AllowEmbedded {
+		return nil, fmt.Errorf("twiddle: no usable hello pool (device and config empty; embedded fallback disabled)")
 	}
 
 	// The embedded pool is partitioned on the same terms. It needs it: four of

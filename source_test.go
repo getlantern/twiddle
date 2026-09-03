@@ -64,8 +64,13 @@ func TestLoadPoolFallsThroughToConfigThenEmbedded(t *testing.T) {
 		t.Errorf("an absent device pool is the normal case, should not be reported: %v", p.Skipped)
 	}
 
-	// Neither path set: embedded.
+	// Neither path set: embedded only when explicitly allowed.
 	p, err = LoadPool(Sources{})
+	if err == nil {
+		t.Fatal("empty sources must not silently use the stale embedded pool")
+	}
+
+	p, err = LoadPool(Sources{AllowEmbedded: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,6 +96,14 @@ func TestLoadPoolFallsThroughOnUnusableEntries(t *testing.T) {
 	}
 
 	p, err := LoadPool(Sources{Device: device})
+	if err == nil {
+		t.Fatal("an unusable device pool must not fall through to embedded")
+	}
+	if p != nil {
+		t.Fatalf("got pool origin %v, want error", p.Origin)
+	}
+
+	p, err = LoadPool(Sources{Device: device, AllowEmbedded: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +202,7 @@ func TestEmbeddedPoolIsPartitionedByBuild(t *testing.T) {
 		t.Fatal("embedded pool is now coherent; drop the partitioning workaround and this test")
 	}
 
-	p, err := LoadPool(Sources{})
+	p, err := LoadPool(Sources{AllowEmbedded: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +218,7 @@ func TestEmbeddedPoolIsPartitionedByBuild(t *testing.T) {
 
 	// Whichever build wins, it must be the same one on every load.
 	for i := 0; i < 5; i++ {
-		q, err := LoadPool(Sources{})
+		q, err := LoadPool(Sources{AllowEmbedded: true})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -224,7 +237,7 @@ func TestEmbeddedPoolIsPartitionedByBuild(t *testing.T) {
 // The ECH GREASE bucket must never be what splits a pool -- Chrome redraws it
 // per connection, so hellos differing only in ECH length are one build.
 func TestECHBucketDoesNotSplitBuilds(t *testing.T) {
-	p, err := LoadPool(Sources{})
+	p, err := LoadPool(Sources{AllowEmbedded: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -539,6 +552,14 @@ func TestConfigInlineIsTheConfigTier(t *testing.T) {
 // the client, and must say why.
 func TestConfigInlineFallsThroughWhenUnusable(t *testing.T) {
 	p, err := LoadPool(Sources{ConfigInline: "not-hex\n"})
+	if err == nil {
+		t.Fatal("an unusable inline pool must not fall through to embedded")
+	}
+	if p != nil {
+		t.Fatalf("got pool origin %v, want error", p.Origin)
+	}
+
+	p, err = LoadPool(Sources{ConfigInline: "not-hex\n", AllowEmbedded: true})
 	if err != nil {
 		t.Fatal(err)
 	}

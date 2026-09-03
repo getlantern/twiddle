@@ -320,6 +320,62 @@ func TestHarvesterKeepsOneBuild(t *testing.T) {
 	}
 }
 
+func otherBuildHello(t *testing.T, marker byte) []byte {
+	t.Helper()
+	other, err := ParseClientHello(tappedVariant(t, "new.example", marker))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, e := range other.Extensions {
+		if e.Type == ExtServerPadding {
+			other.Extensions = append(other.Extensions[:i:i], other.Extensions[i+1:]...)
+			break
+		}
+	}
+	return other.Marshal()
+}
+
+// After two old-build hellos, Offer used to reject every new-build sample
+// because each was a 1-vs-2 minority. Ten new-build offers then accepted 0.
+func TestHarvesterNewBuildCanTakeOver(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "device.hex")
+	hv := NewHarvester(path, 0)
+
+	for _, m := range []byte{1, 2} {
+		if ok, err := hv.Offer(tappedVariant(t, "a.example", m)); err != nil || !ok {
+			t.Fatalf("seed old build %d: ok=%v err=%v", m, ok, err)
+		}
+	}
+	if hv.Len() != 2 {
+		t.Fatalf("seeded %d, want 2", hv.Len())
+	}
+
+	accepted := 0
+	for m := byte(1); m <= 10; m++ {
+		ok, err := hv.Offer(otherBuildHello(t, m))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok {
+			accepted++
+		}
+	}
+	if accepted == 0 {
+		t.Fatal("new-build hellos were all rejected; the new build can never become the majority")
+	}
+	stored, _ := readPoolFile(path)
+	if err := Coherent(stored); err != nil {
+		t.Fatalf("after takeover the pool mixes builds: %v", err)
+	}
+	h, err := ParseClientHello(stored[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.Find(ExtServerPadding) != nil {
+		t.Fatal("emit pool is still the old build")
+	}
+}
+
 func TestHarvesterHonoursMaxAndReloads(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "device.hex")
 	hv := NewHarvester(path, 3)

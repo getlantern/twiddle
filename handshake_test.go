@@ -19,11 +19,21 @@ func pool(t *testing.T) [][]byte {
 	return out
 }
 
+func mustCover(t *testing.T, host string) CoverProfile {
+	t.Helper()
+	p, err := CoverFor(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 // TestEndToEndOverSocket is the Phase 0 goal: a client and server complete the
 // opening over a real socket and pass bytes through the record layer.
 func TestEndToEndOverSocket(t *testing.T) {
 	k := ticketKey(t)
-	cred, err := k.Issue(99, DefaultTicketLen)
+	cover := mustCover(t, "www.microsoft.com")
+	cred, err := k.Issue(99, cover.TicketLen)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +54,10 @@ func TestEndToEndOverSocket(t *testing.T) {
 			srvCh <- result{nil, err}
 			return
 		}
-		sc, err := Server(c, ServerConfig{TicketKey: k, MaxAge: time.Hour})
+		sc, err := Server(c, ServerConfig{
+			TicketKey: k, Cover: cover,
+			MaxAge: time.Hour, Replay: NewReplayCache(16, time.Hour),
+		})
 		srvCh <- result{sc, err}
 	}()
 
@@ -53,7 +66,7 @@ func TestEndToEndOverSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	cc, next, err := Client(raw, ClientConfig{
-		Pool: pool(t), CoverSNI: "www.microsoft.com", Credential: cred,
+		Pool: pool(t), Cover: cover, Credential: cred,
 	})
 	if err != nil {
 		t.Fatalf("client: %v", err)
@@ -92,6 +105,7 @@ func TestEndToEndOverSocket(t *testing.T) {
 func TestServerRejectsUnauthenticated(t *testing.T) {
 	k := ticketKey(t)
 	other := ticketKey(t)
+	cover := mustCover(t, "www.microsoft.com")
 	badCred, _ := other.Issue(1, DefaultTicketLen)
 
 	cases := map[string]func(net.Conn){
@@ -118,7 +132,10 @@ func TestServerRejectsUnauthenticated(t *testing.T) {
 					return
 				}
 				c.SetReadDeadline(time.Now().Add(3 * time.Second))
-				_, err = Server(c, ServerConfig{TicketKey: k, MaxAge: time.Hour})
+				_, err = Server(c, ServerConfig{
+					TicketKey: k, Cover: cover,
+					MaxAge: time.Hour, Replay: NewReplayCache(16, time.Hour),
+				})
 				errCh <- err
 			}()
 			c, err := net.Dial("tcp", ln.Addr().String())
@@ -158,7 +175,7 @@ func TestOpeningLooksLikeTLS(t *testing.T) {
 		captured <- seen
 	}()
 	raw, _ := net.Dial("tcp", ln.Addr().String())
-	go Client(raw, ClientConfig{Pool: pool(t), CoverSNI: "www.microsoft.com", Credential: cred})
+	go Client(raw, ClientConfig{Pool: pool(t), Cover: mustCover(t, "www.microsoft.com"), Credential: cred})
 	first := <-captured
 
 	if len(first) < 5 {
