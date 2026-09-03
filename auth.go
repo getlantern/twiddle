@@ -96,6 +96,38 @@ func (k *TicketKey) Issue(clientID uint64, ticketLen int) (*Credential, error) {
 }
 
 func (k *TicketKey) issueAt(clientID uint64, ticketLen int, now time.Time) (*Credential, error) {
+	cred := &Credential{}
+	if _, err := rand.Read(cred.PSK[:]); err != nil {
+		return nil, err
+	}
+	ticket, err := k.seal(clientID, cred.PSK, ticketLen, now)
+	if err != nil {
+		return nil, err
+	}
+	cred.Ticket = ticket
+	return cred, nil
+}
+
+// IssueFull mints the full-handshake companion to an existing credential: the
+// same clientID and psk, sealed at FullTicketLen so it fits inside the ECH
+// payload.
+//
+// A client needs both tickets because the two paths size them for different
+// reasons. On the resumption path the length is a fidelity parameter -- the
+// ticket sets the emitted hello size, so it must match the identity being
+// impersonated. Inside the ECH payload it must instead fit Chrome's smallest
+// bucket. Those two constraints do not meet: a microsoft-sized 256-byte ticket
+// fits no ECH bucket at all. Sharing the psk is what keeps them one credential
+// rather than two identities, so rotation and the replay gate see a single
+// client either way.
+func (k *TicketKey) IssueFull(clientID uint64, psk [32]byte) ([]byte, error) {
+	return k.seal(clientID, psk, FullTicketLen, time.Now())
+}
+
+// seal builds one ticket. The plaintext is padded to fill ticketLen so every
+// ticket a server issues at a given length is that length, as a real server's
+// would be.
+func (k *TicketKey) seal(clientID uint64, psk [32]byte, ticketLen int, now time.Time) ([]byte, error) {
 	if ticketLen < MinTicketLen {
 		return nil, fmt.Errorf("twiddle: ticket length %d below minimum %d", ticketLen, MinTicketLen)
 	}
@@ -103,14 +135,10 @@ func (k *TicketKey) issueAt(clientID uint64, ticketLen int, now time.Time) (*Cre
 	if err != nil {
 		return nil, err
 	}
-	cred := &Credential{}
-	if _, err := rand.Read(cred.PSK[:]); err != nil {
-		return nil, err
-	}
 
 	plain := make([]byte, ticketLen-ticketNonceLen-ticketTagLen)
 	binary.BigEndian.PutUint64(plain[0:8], clientID)
-	copy(plain[8:40], cred.PSK[:])
+	copy(plain[8:40], psk[:])
 	binary.BigEndian.PutUint64(plain[40:48], uint64(now.Unix()))
 	if _, err := rand.Read(plain[ticketFixed:]); err != nil {
 		return nil, err
@@ -120,8 +148,7 @@ func (k *TicketKey) issueAt(clientID uint64, ticketLen int, now time.Time) (*Cre
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, err
 	}
-	cred.Ticket = aead.Seal(nonce, nonce, plain, nil)
-	return cred, nil
+	return aead.Seal(nonce, nonce, plain, nil), nil
 }
 
 // Open recovers a ticket's contents. Only the holder of the ticket key can do
@@ -341,5 +368,3 @@ func parsePSK(d []byte) (ticket []byte, age [4]byte, binder []byte, err error) {
 	}
 	return ticket, age, d[p+1 : p+1+bl], nil
 }
-
-
