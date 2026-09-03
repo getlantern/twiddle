@@ -39,6 +39,15 @@ const (
 	contentAppData   = 0x17
 	contentAlert     = 0x15
 	contentHandshake = 0x16
+
+	alertWarning     = 0x01
+	alertCloseNotify = 0x00
+
+	// closeNotifyWire is what a real endpoint puts on the wire at teardown:
+	// 5-byte header + 2-byte alert + 1 inner content type + 16-byte AEAD tag.
+	// Measured at exactly 24 B from all three covers, in both AES-128-GCM and
+	// AES-256-GCM (harvest/testdata/postflight-resumed.log).
+	closeNotifyWire = 24
 )
 
 // Keys is one direction's traffic secret material.
@@ -113,6 +122,10 @@ type Conn struct {
 	wbuf     []byte
 	flushing bool
 	werr     error
+
+	// closeOnce guards the close_notify alert: Close may be called more than
+	// once, and a second alert would itself be the anomaly.
+	closeOnce sync.Once
 
 	rmu     sync.Mutex
 	recv    cipher.AEAD
@@ -311,7 +324,24 @@ func (c *Conn) readRecord() error {
 	return nil
 }
 
-func (c *Conn) Close() error                       { return c.raw.Close() }
+// Close sends close_notify, then closes the socket.
+//
+// Every real TLS 1.3 endpoint measured emits exactly one 24-byte alert record
+// at teardown. Closing bare put a sequence on the wire that no TLS endpoint
+// produces, on the LAST record of the connection -- which is as cheap for an
+// observer to watch as the first, and was the only record of ours that was
+// unconditionally wrong.
+//
+// Best-effort: if the peer is already gone the write fails, and that is not a
+// reason to fail Close. Once only, because Close may be called twice and a
+// second alert would itself be the anomaly.
+func (c *Conn) Close() error {
+	c.closeOnce.Do(func() {
+		_ = c.writeSized(contentAlert, []byte{alertWarning, alertCloseNotify}, closeNotifyWire)
+	})
+	return c.raw.Close()
+}
+
 func (c *Conn) LocalAddr() net.Addr                { return c.raw.LocalAddr() }
 func (c *Conn) RemoteAddr() net.Addr               { return c.raw.RemoteAddr() }
 func (c *Conn) SetDeadline(t time.Time) error      { return c.raw.SetDeadline(t) }

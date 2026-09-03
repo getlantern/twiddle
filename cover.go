@@ -3,6 +3,7 @@ package twiddle
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -15,13 +16,29 @@ import (
 // tls13-burst-resumption.log (Xue Wb=3). BinderLen is the Hash.length of
 // CipherSuite — 32 for SHA-256, 48 for SHA-384.
 type CoverProfile struct {
-	Host               string
-	CipherSuite        uint16
-	BinderLen          int
-	TicketLen          int
-	PSKFirst           bool
-	ServerOpeningBurst int
-	ClientFlight       int
+	Host        string
+	CipherSuite uint16
+	BinderLen   int
+	TicketLen   int
+	PSKFirst    bool
+	// ServerRemainder is the encrypted record SEQUENCE the cover sends after
+	// ServerHello and ChangeCipherSpec -- not a total.
+	//
+	// The distinction is the whole point: cloudflare and google coalesce
+	// EncryptedExtensions and Finished into one 64 B record, while microsoft
+	// sends 32 then 74. Modelled as a single 106 B total, microsoft's byte
+	// count matched while we put 3 server records on the wire where the real
+	// identity puts 4. The total is what a sum models; the sequence is what an
+	// observer counts.
+	ServerRemainder []int
+
+	// ClientFlight is a TOTAL, deliberately, because only the total is
+	// measured. It comes from Chrome captures
+	// (harvest/testdata/tls13-burst-resumption.log); the record split within it
+	// is unknown, and a Go TLS client is not a valid probe for it -- see the
+	// caveat in harvest/testdata/postflight-resumed.log. Do not turn this into
+	// a sequence until Chrome has been captured.
+	ClientFlight int
 }
 
 // ErrUnknownCover is returned when a caller names a host we have not measured,
@@ -30,31 +47,31 @@ var ErrUnknownCover = fmt.Errorf("twiddle: unknown cover identity")
 
 var covers = map[string]CoverProfile{
 	"www.cloudflare.com": {
-		Host:               "www.cloudflare.com",
-		CipherSuite:        TLS_AES_128_GCM_SHA256,
-		BinderLen:          32,
-		TicketLen:          176,
-		PSKFirst:           true,
-		ServerOpeningBurst: 1291,
-		ClientFlight:       149,
+		Host:            "www.cloudflare.com",
+		CipherSuite:     TLS_AES_128_GCM_SHA256,
+		BinderLen:       32,
+		TicketLen:       176,
+		PSKFirst:        true,
+		ServerRemainder: []int{64},
+		ClientFlight:    149,
 	},
 	"www.google.com": {
-		Host:               "www.google.com",
-		CipherSuite:        TLS_AES_128_GCM_SHA256,
-		BinderLen:          32,
-		TicketLen:          230,
-		PSKFirst:           true,
-		ServerOpeningBurst: 1291,
-		ClientFlight:       145,
+		Host:            "www.google.com",
+		CipherSuite:     TLS_AES_128_GCM_SHA256,
+		BinderLen:       32,
+		TicketLen:       230,
+		PSKFirst:        true,
+		ServerRemainder: []int{64},
+		ClientFlight:    145,
 	},
 	"www.microsoft.com": {
-		Host:               "www.microsoft.com",
-		CipherSuite:        TLS_AES_256_GCM_SHA384,
-		BinderLen:          48,
-		TicketLen:          256,
-		PSKFirst:           false,
-		ServerOpeningBurst: 1333,
-		ClientFlight:       164,
+		Host:            "www.microsoft.com",
+		CipherSuite:     TLS_AES_256_GCM_SHA384,
+		BinderLen:       48,
+		TicketLen:       256,
+		PSKFirst:        false,
+		ServerRemainder: []int{32, 74},
+		ClientFlight:    164,
 	},
 }
 
@@ -84,7 +101,7 @@ func (p CoverProfile) Valid() error {
 	}
 	if p.CipherSuite != known.CipherSuite || p.BinderLen != known.BinderLen ||
 		p.TicketLen != known.TicketLen || p.PSKFirst != known.PSKFirst ||
-		p.ServerOpeningBurst != known.ServerOpeningBurst || p.ClientFlight != known.ClientFlight {
+		!slices.Equal(p.ServerRemainder, known.ServerRemainder) || p.ClientFlight != known.ClientFlight {
 		return fmt.Errorf("twiddle: cover profile for %s does not match the measured identity", p.Host)
 	}
 	return nil
@@ -121,13 +138,15 @@ func (p CoverProfile) validateClientHello(h *ClientHello) ([]byte, error) {
 	return ticket, nil
 }
 
-// ServerEncryptedWire is the application_data record that follows ServerHello
-// and CCS in the first server burst. The burst was measured as a whole
-// (1291–1333 B); the encrypted remainder is that minus the 1221-byte
-// ServerHello and the 6-byte CCS. Using the burst total as the encrypted
-// payload was the size bug: the server then wrote [1221, 6, ~1400].
-func (p CoverProfile) ServerEncryptedWire() int {
-	return p.ServerOpeningBurst - ServerHelloResumedLen - len(ChangeCipherSpec())
+// ServerOpeningBurst totals the first server burst: ServerHello, the
+// ChangeCipherSpec, and every encrypted remainder record. Derived from the
+// sequence so the two can never disagree.
+func (p CoverProfile) ServerOpeningBurst() int {
+	total := ServerHelloResumedLen + len(ChangeCipherSpec())
+	for _, n := range p.ServerRemainder {
+		total += n
+	}
+	return total
 }
 
 // ClientEncryptedWire is the application_data record that follows the client

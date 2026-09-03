@@ -104,10 +104,15 @@ func Client(raw net.Conn, cfg ClientConfig) (*Conn, *Credential, error) {
 		return nil, nil, err
 	}
 
-	// Server EncryptedExtensions+Finished stand-in, sized to the measured
-	// remainder of the first server burst — not the burst total.
-	if _, _, err := conn.consumeRecord(); err != nil {
-		return nil, nil, err
+	// Server EncryptedExtensions+Finished stand-in. One read per record the
+	// cover sends, because the count varies by identity: microsoft splits the
+	// remainder 32/74 where cloudflare and google coalesce it into one 64.
+	// Reading a fixed one record left microsoft's second record in the stream
+	// and every later read misaligned.
+	for range cfg.Cover.ServerRemainder {
+		if _, _, err := conn.consumeRecord(); err != nil {
+			return nil, nil, err
+		}
 	}
 	if _, err := raw.Write(ChangeCipherSpec()); err != nil {
 		return nil, nil, err
@@ -202,8 +207,12 @@ func Server(raw net.Conn, cfg ServerConfig) (*Conn, error) {
 		return nil, err
 	}
 
-	if err := conn.writeSized(contentHandshake, nil, cfg.Cover.ServerEncryptedWire()); err != nil {
-		return nil, err
+	// One write per record the cover actually sends: microsoft splits the
+	// remainder 32/74 where cloudflare and google coalesce it into one 64.
+	for _, n := range cfg.Cover.ServerRemainder {
+		if err := conn.writeSized(contentHandshake, nil, n); err != nil {
+			return nil, err
+		}
 	}
 	if _, err := readRecord(raw); err != nil { // client ChangeCipherSpec
 		return nil, err

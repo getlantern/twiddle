@@ -3,6 +3,7 @@ package twiddle
 import (
 	"encoding/binary"
 	"net"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -118,17 +119,25 @@ func TestOpeningRecordSequenceMatchesCover(t *testing.T) {
 			if sw[1] != len(ChangeCipherSpec()) {
 				t.Errorf("server CCS %d, want %d", sw[1], len(ChangeCipherSpec()))
 			}
-			if sw[2] != cover.ServerEncryptedWire() {
-				t.Errorf("server encrypted remainder %d, want %d (burst %d - SH %d - CCS %d)",
-					sw[2], cover.ServerEncryptedWire(), cover.ServerOpeningBurst,
-					ServerHelloResumedLen, len(ChangeCipherSpec()))
+			// The remainder is a SEQUENCE. Asserting only its total is what let
+			// microsoft's 32/74 split pass while we emitted a single 106.
+			rem := cover.ServerRemainder
+			if len(sw) < 2+len(rem) {
+				t.Fatalf("server writes %v, want SH + CCS + %d remainder record(s)", sw, len(rem))
 			}
-			sum := sw[0] + sw[1] + sw[2]
-			if sum != cover.ServerOpeningBurst {
-				t.Errorf("first server burst %d, measured %d", sum, cover.ServerOpeningBurst)
+			got := sw[2 : 2+len(rem)]
+			if !slices.Equal(got, rem) {
+				t.Errorf("server remainder records %v, measured %v", got, rem)
 			}
-			if len(sw) < 4 || sw[3] != sessionTicketWire {
-				t.Errorf("NewSessionTicket write %v, want %d after the opening burst", sw[3:], sessionTicketWire)
+			sum := 0
+			for _, n := range sw[:2+len(rem)] {
+				sum += n
+			}
+			if sum != cover.ServerOpeningBurst() {
+				t.Errorf("first server burst %d, measured %d", sum, cover.ServerOpeningBurst())
+			}
+			if tick := 2 + len(rem); len(sw) < tick+1 || sw[tick] != sessionTicketWire {
+				t.Errorf("NewSessionTicket write %v, want %d after the opening burst", sw[tick:], sessionTicketWire)
 			}
 
 			cw := clientSpy.snapshot()
@@ -331,5 +340,55 @@ func TestUnknownCoverIsRejected(t *testing.T) {
 	cfg := ClientConfig{Pool: pool(t), Cover: CoverProfile{Host: "www.microsoft.com", BinderLen: 32}}
 	if _, _, err := Client(nil, cfg); err == nil {
 		t.Fatal("a partial microsoft profile (32-byte binder) was accepted")
+	}
+}
+
+// Every real TLS 1.3 endpoint measured emits exactly one 24-byte close_notify
+// at teardown (harvest/testdata/postflight-resumed.log). Closing bare put a
+// record sequence on the wire that no TLS endpoint produces, on the last record
+// of the connection.
+func TestCloseSendsCloseNotify(t *testing.T) {
+	for _, host := range MeasuredCovers() {
+		t.Run(host, func(t *testing.T) {
+			cover := mustCover(t, host)
+			sess, err := DeriveSession(make([]byte, 32), make([]byte, 32), cover.CipherSuite)
+			if err != nil {
+				t.Fatal(err)
+			}
+			server, client := net.Pipe()
+			defer server.Close()
+
+			spy := &spyConn{Conn: client}
+			c, err := NewConn(spy, sess, true, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// net.Pipe is synchronous, so drain while Close writes the alert.
+			go func() {
+				buf := make([]byte, 4096)
+				for {
+					if _, err := server.Read(buf); err != nil {
+						return
+					}
+				}
+			}()
+
+			if err := c.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			w := spy.snapshot()
+			if len(w) != 1 {
+				t.Fatalf("Close wrote %v records, want exactly one close_notify", w)
+			}
+			if w[0] != closeNotifyWire {
+				t.Errorf("close_notify record %d B, measured %d B", w[0], closeNotifyWire)
+			}
+
+			// Idempotent: a second alert would itself be the anomaly.
+			_ = c.Close()
+			if w2 := spy.snapshot(); len(w2) != 1 {
+				t.Errorf("a second Close wrote another record: %v", w2)
+			}
+		})
 	}
 }
