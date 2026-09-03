@@ -5,6 +5,13 @@ harvest/cmd/*/flight
 harvest/cmd/*/capture
 harvest/cmd/*/tapproxy
 harvest/cmd/*/resume
+harvest/cmd/*/postflight
+harvest/cmd/*/arrival
+# `go build ./cmd/x` from harvest/ drops the binary here, not next to its source
+harvest/postflight
+harvest/arrival
+harvest/flight
+harvest/resume
 bin/
 # locally generated certs -- the key is private, regenerate with mkcert
 harvest/testdata/*.pem
