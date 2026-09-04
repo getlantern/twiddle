@@ -83,6 +83,15 @@ func TestEndToEndOverSocket(t *testing.T) {
 	if _, _, _, err := k.Open(next.Ticket); err != nil {
 		t.Fatalf("rotated ticket does not open: %v", err)
 	}
+	// Rotation must carry BOTH tickets. Rotating only the resumption ticket
+	// would let the full-handshake companion age out of MaxAge while the
+	// client kept working, silently collapsing it back to resumption-only.
+	if len(next.FullTicket) != FullTicketLen {
+		t.Fatalf("rotated credential carries a %d-byte full ticket, want %d", len(next.FullTicket), FullTicketLen)
+	}
+	if _, _, _, err := k.Open(next.FullTicket); err != nil {
+		t.Fatalf("rotated full ticket does not open: %v", err)
+	}
 
 	payload := make([]byte, 60000)
 	rand.Read(payload)
@@ -224,6 +233,34 @@ func TestSynthesizedServerHelloMatchesMeasuredLength(t *testing.T) {
 	}
 	h, _ := ParseClientHello(wire)
 	eph, _ := h.KeyShare()
+
+	// The full variant omits pre_shared_key, and that omission is the ENTIRE
+	// difference between the two measured lengths -- 6 bytes: type, length and
+	// selected_identity. Both are point targets from
+	// harvest/testdata/postflight-full-vs-resumed.log, not ranges.
+	if ServerHelloResumedLen-ServerHelloFullLen != 6 {
+		t.Errorf("the measured lengths differ by %d, not the 6 bytes pre_shared_key occupies",
+			ServerHelloResumedLen-ServerHelloFullLen)
+	}
+	for _, full := range []bool{false, true} {
+		for _, pskFirst := range []bool{false, true} {
+			sh, err := SynthesizeServerHello(ServerHelloParams{
+				SessionIDEcho: h.SessionID, ServerEphemeral: eph,
+				PSKFirst: pskFirst, FullHandshake: full,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := ServerHelloResumedLen
+			if full {
+				want = ServerHelloFullLen
+			}
+			if len(sh) != want {
+				t.Errorf("full=%v PSKFirst=%v: ServerHello is %d bytes, measured %d",
+					full, pskFirst, len(sh), want)
+			}
+		}
+	}
 
 	for _, pskFirst := range []bool{false, true} {
 		sh, err := SynthesizeServerHello(ServerHelloParams{
@@ -397,5 +434,826 @@ func TestReadTicketsRejectsNonHandshakeRecords(t *testing.T) {
 
 	if _, err := readTickets(r); err == nil {
 		t.Error("readTickets accepted an application_data record as a rotated credential")
+	}
+}
+
+// fullCover returns a microsoft profile with a full-handshake shape adopted.
+// The table ships none on purpose -- the certificate flight cannot be a
+// constant -- so a test that needs one must supply it the way an egress does,
+// through Adopt, which also exercises the adoption path.
+func fullCover(t *testing.T) CoverProfile {
+	t.Helper()
+	base := mustCover(t, "www.microsoft.com")
+	// harvest/testdata/postflight-full-vs-resumed.log
+	remainder := []int{32, 8273, 286, 74}
+	burst := ServerHelloFullLen + len(ChangeCipherSpec())
+	for _, n := range remainder {
+		burst += n
+	}
+	p, err := base.Adopt(ProbeResult{
+		Host: base.Host, Full: true,
+		ServerHello:     ServerHelloFullLen,
+		Remainder:       remainder,
+		RemainderJitter: []int{0, 1, 0, 0},
+		OpeningBurst:    burst,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.CanEmitFullHandshake() {
+		t.Fatal("adopted profile still cannot emit a full handshake")
+	}
+	return p
+}
+
+// The full-handshake path end to end: no pre_shared_key anywhere, a 1215-byte
+// ServerHello, a certificate-sized remainder, and bytes through the tunnel.
+func TestEndToEndFullHandshake(t *testing.T) {
+	k := ticketKey(t)
+	cover := fullCover(t)
+	cred, err := k.Issue(77, cover.TicketLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	type result struct {
+		conn *Conn
+		err  error
+	}
+	srvCh := make(chan result, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			srvCh <- result{nil, err}
+			return
+		}
+		sc, err := Server(c, ServerConfig{
+			TicketKey: k, Cover: cover,
+			MaxAge: time.Hour, Replay: NewReplayCache(16, time.Hour),
+		})
+		srvCh <- result{sc, err}
+	}()
+
+	raw, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cc, next, err := Client(raw, ClientConfig{
+		Pool: pool(t), Cover: cover, Credential: cred, FullHandshake: true,
+	})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	r := <-srvCh
+	if r.err != nil {
+		t.Fatalf("server: %v", r.err)
+	}
+	if next == nil || len(next.FullTicket) != FullTicketLen {
+		t.Fatal("the full-handshake flight did not rotate both tickets")
+	}
+
+	payload := make([]byte, 40000)
+	rand.Read(payload)
+	go func() {
+		r.conn.Write(payload)
+		r.conn.Close()
+	}()
+	got, err := io.ReadAll(cc)
+	if err != nil && err != io.EOF {
+		t.Fatalf("read: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("payload mismatch: got %d bytes, want %d", len(got), len(payload))
+	}
+	t.Logf("opened a full handshake and carried %d bytes", len(got))
+}
+
+// What the censor counts. The server's answer to a full handshake must be a
+// 1215-byte ServerHello, a ChangeCipherSpec, and one record per FullRemainder
+// entry -- microsoft's four, not a single coalesced blob. A fixed record count
+// here was the bug the resumed path already hit from the other side.
+func TestServerAnswersAFullHandshakeWithTheMeasuredShape(t *testing.T) {
+	k := ticketKey(t)
+	cover := fullCover(t)
+	cred, err := k.Issue(78, cover.TicketLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		c.SetDeadline(time.Now().Add(5 * time.Second))
+		Server(c, ServerConfig{
+			TicketKey: k, Cover: cover,
+			MaxAge: time.Hour, Replay: NewReplayCache(16, time.Hour),
+		})
+	}()
+
+	raw, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	raw.SetDeadline(time.Now().Add(5 * time.Second))
+
+	wire, _, err := Twiddle(pool(t)[0], Options{
+		CoverSNI: cover.Host, Credential: cred, FullHandshake: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The opening itself must read as a full handshake.
+	h, err := ParseClientHello(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.Find(ExtPreSharedKey) != nil {
+		t.Fatal("the emitted opening carries pre_shared_key; it still reads as a resumption")
+	}
+	if _, err := raw.Write(wire); err != nil {
+		t.Fatal(err)
+	}
+
+	sh, err := readRecord(raw)
+	if err != nil {
+		t.Fatalf("ServerHello: %v", err)
+	}
+	if len(sh) != ServerHelloFullLen {
+		t.Errorf("ServerHello is %d bytes, want the full-handshake %d", len(sh), ServerHelloFullLen)
+	}
+	if _, err := readRecord(raw); err != nil { // ChangeCipherSpec
+		t.Fatalf("ChangeCipherSpec: %v", err)
+	}
+
+	var got []int
+	for range cover.FullRemainder {
+		rec, err := readRecord(raw)
+		if err != nil {
+			t.Fatalf("remainder record %d of %d: %v", len(got)+1, len(cover.FullRemainder), err)
+		}
+		got = append(got, len(rec))
+	}
+	if len(got) != len(cover.FullRemainder) {
+		t.Fatalf("read %d remainder records, want %d", len(got), len(cover.FullRemainder))
+	}
+	for i, n := range got {
+		lo := cover.FullRemainder[i]
+		hi := lo + cover.FullRemainderJitter[i]
+		if n < lo || n > hi {
+			t.Errorf("remainder record %d is %d bytes, outside the sampled [%d, %d]", i, n, lo, hi)
+		}
+	}
+	// A fifth record would mean the server coalesced or split differently than
+	// the identity it claims.
+	raw.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+	if extra, err := readRecord(raw); err == nil {
+		t.Errorf("server sent an unexpected %d-byte record after the remainder", len(extra))
+	}
+	t.Logf("full opening: SH %d, ccs %d, remainder %v", len(sh), len(ChangeCipherSpec()), got)
+}
+
+// The two ways a client can ask for a shape it cannot produce.
+func TestFullHandshakeRefusesWhatItCannotBack(t *testing.T) {
+	k := ticketKey(t)
+
+	t.Run("cover has no measured full profile", func(t *testing.T) {
+		cover := mustCover(t, "www.microsoft.com") // table default: no FullRemainder
+		cred, _ := k.Issue(79, cover.TicketLen)
+		_, _, err := Client(nil, ClientConfig{
+			Pool: pool(t), Cover: cover, Credential: cred, FullHandshake: true,
+		})
+		if err == nil {
+			t.Fatal("a full handshake was attempted against a cover with no measured profile")
+		}
+		if !contains(err.Error(), "full-handshake profile") {
+			t.Errorf("unhelpful error: %v", err)
+		}
+	})
+
+	t.Run("server has no measured full profile", func(t *testing.T) {
+		// The client gate is not the only one that matters: a server whose cover
+		// was never probed must refuse rather than answer with a guessed
+		// certificate flight, which would be a distinguisher of its own.
+		emit := fullCover(t)
+		serve := mustCover(t, "www.microsoft.com") // table default
+		cred, _ := k.Issue(81, emit.TicketLen)
+
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ln.Close()
+		errCh := make(chan error, 1)
+		go func() {
+			c, err := ln.Accept()
+			if err != nil {
+				errCh <- err
+				return
+			}
+			defer c.Close()
+			c.SetDeadline(time.Now().Add(3 * time.Second))
+			_, err = Server(c, ServerConfig{
+				TicketKey: k, Cover: serve,
+				MaxAge: time.Hour, Replay: NewReplayCache(16, time.Hour),
+			})
+			errCh <- err
+		}()
+		raw, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer raw.Close()
+		wire, _, err := Twiddle(pool(t)[0], Options{
+			CoverSNI: emit.Host, Credential: cred, FullHandshake: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := raw.Write(wire); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-errCh; err != ErrNotOurs {
+			t.Fatalf("got %v, want ErrNotOurs -- the server answered a shape it has not measured", err)
+		}
+	})
+
+	t.Run("credential has no companion ticket", func(t *testing.T) {
+		cover := fullCover(t)
+		cred, _ := k.Issue(80, cover.TicketLen)
+		cred.FullTicket = nil // as CredentialFromWire would leave it
+		_, _, err := Twiddle(pool(t)[0], Options{
+			CoverSNI: cover.Host, Credential: cred, FullHandshake: true,
+		})
+		if err == nil {
+			t.Fatal("a full handshake was emitted from a resumption-only credential")
+		}
+		if !contains(err.Error(), "full ticket") {
+			t.Errorf("unhelpful error: %v", err)
+		}
+	})
+}
+
+// The regression the pool filter exists for. With one carrier among many
+// hellos that cannot carry a ticket, a client drawing uniformly succeeds only
+// about a sixth of the time; the failure depends on the draw, so it would
+// present as a flaky connection rather than a broken configuration.
+func TestClientAlwaysPicksACarrierFromAMixedPool(t *testing.T) {
+	k := ticketKey(t)
+	cover := fullCover(t)
+	base := DefaultPool()[0]
+	mixed := [][]byte{
+		stripECH(t, base),
+		shrinkECH(t, base, FullTicketLen-1),
+		shrinkECH(t, base, 16),
+		shrinkECH(t, base, 100),
+		stripECH(t, base),
+		base, // the only carrier
+	}
+
+	for i := 0; i < 12; i++ {
+		cred, err := k.Issue(uint64(200+i), cover.TicketLen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		go func() {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close()
+			c.SetDeadline(time.Now().Add(5 * time.Second))
+			Server(c, ServerConfig{
+				TicketKey: k, Cover: cover,
+				MaxAge: time.Hour, Replay: NewReplayCache(16, time.Hour),
+			})
+		}()
+		raw, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			ln.Close()
+			t.Fatal(err)
+		}
+		_, _, err = Client(raw, ClientConfig{
+			Pool: mixed, Cover: cover, Credential: cred, FullHandshake: true,
+		})
+		raw.Close()
+		ln.Close()
+		if err != nil {
+			t.Fatalf("attempt %d of 12 failed: %v -- the pool draw is not restricted to carriers", i+1, err)
+		}
+	}
+}
+
+// And a pool with no carrier at all must fail clearly, not on the draw.
+func TestFullHandshakeWithNoCarrierInThePoolFailsClearly(t *testing.T) {
+	k := ticketKey(t)
+	cover := fullCover(t)
+	cred, _ := k.Issue(210, cover.TicketLen)
+	none := [][]byte{stripECH(t, DefaultPool()[0]), shrinkECH(t, DefaultPool()[0], 32)}
+
+	_, _, err := Client(nil, ClientConfig{
+		Pool: none, Cover: cover, Credential: cred, FullHandshake: true,
+	})
+	if err == nil {
+		t.Fatal("a full handshake was attempted from a pool with no carrier")
+	}
+	if !contains(err.Error(), "ECH payload") {
+		t.Errorf("unhelpful error: %v", err)
+	}
+}
+
+// dialOnce runs one full client/server exchange and reports the shape each end
+// believes it used. Both are returned because a disagreement is the failure
+// worth catching: the two ends would then be reading different record counts.
+func dialOnce(t *testing.T, k *TicketKey, cover CoverProfile, cfg ClientConfig, replay *ReplayCache) (clientFull, serverFull bool, err error) {
+	t.Helper()
+	ln, lerr := net.Listen("tcp", "127.0.0.1:0")
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	defer ln.Close()
+
+	type sres struct {
+		full bool
+		err  error
+	}
+	srvCh := make(chan sres, 1)
+	go func() {
+		c, aerr := ln.Accept()
+		if aerr != nil {
+			srvCh <- sres{false, aerr}
+			return
+		}
+		c.SetDeadline(time.Now().Add(5 * time.Second))
+		sc, serr := Server(c, ServerConfig{
+			TicketKey: k, Cover: cover, MaxAge: time.Hour, Replay: replay,
+		})
+		if serr != nil {
+			srvCh <- sres{false, serr}
+			return
+		}
+		srvCh <- sres{sc.FullHandshake(), nil}
+	}()
+
+	raw, derr := net.Dial("tcp", ln.Addr().String())
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	defer raw.Close()
+	raw.SetDeadline(time.Now().Add(5 * time.Second))
+	cc, _, cerr := Client(raw, cfg)
+	r := <-srvCh
+	if cerr != nil {
+		return false, false, cerr
+	}
+	if r.err != nil {
+		return false, false, r.err
+	}
+	return cc.FullHandshake(), r.full, nil
+}
+
+// The mix policy end to end: the first connection to an egress is a full
+// handshake, and the next one resumes. That is the whole point -- a resumption
+// with no observable predecessor is the distinguisher, and one full handshake
+// per egress removes it.
+func TestContactsMakeFirstContactFullAndTheNextResumed(t *testing.T) {
+	k := ticketKey(t)
+	cover := fullCover(t)
+	replay := NewReplayCache(64, time.Hour)
+	mem := NewContactMemory(time.Hour, 0)
+
+	cred, err := k.Issue(300, cover.TicketLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := ClientConfig{Pool: pool(t), Cover: cover, Credential: cred, Contacts: mem}
+
+	cf, sf, err := dialOnce(t, k, cover, cfg, replay)
+	if err != nil {
+		t.Fatalf("first connection: %v", err)
+	}
+	if !cf || !sf {
+		t.Fatalf("first contact was client-full=%v server-full=%v, want both true", cf, sf)
+	}
+	if mem.Tracked() != 1 {
+		t.Fatalf("the completed full handshake was not recorded (%d contacts)", mem.Tracked())
+	}
+
+	// A fresh credential, as rotation would supply, so the second connection
+	// fails for shape reasons rather than a spent ticket.
+	cfg.Credential, err = k.Issue(300, cover.TicketLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cf, sf, err = dialOnce(t, k, cover, cfg, replay)
+	if err != nil {
+		t.Fatalf("second connection: %v", err)
+	}
+	if cf || sf {
+		t.Errorf("the second connection was client-full=%v server-full=%v, want both false", cf, sf)
+	}
+
+	// And past the horizon it re-fulls, because the censor can no longer be
+	// assumed to remember.
+	mem.Reset()
+	cfg.Credential, err = k.Issue(300, cover.TicketLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cf, _, err = dialOnce(t, k, cover, cfg, replay)
+	if err != nil {
+		t.Fatalf("third connection: %v", err)
+	}
+	if !cf {
+		t.Error("after the relationship was forgotten the client did not re-full")
+	}
+}
+
+// A Contacts-driven choice degrades rather than failing when the cover has no
+// measured full profile, because refusing the connection would make enabling
+// Contacts depend on every cover having been probed first. The degradation must
+// not be recorded, or it would latch: one silent resumption would look like a
+// satisfied relationship forever.
+func TestContactsDegradeWhenTheCoverCannotBackAFullHandshake(t *testing.T) {
+	k := ticketKey(t)
+	cover := mustCover(t, "www.microsoft.com") // table default: no full profile
+	mem := NewContactMemory(time.Hour, 0)
+	cred, err := k.Issue(310, cover.TicketLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cf, sf, err := dialOnce(t, k, cover,
+		ClientConfig{Pool: pool(t), Cover: cover, Credential: cred, Contacts: mem},
+		NewReplayCache(64, time.Hour))
+	if err != nil {
+		t.Fatalf("the connection was refused instead of degrading: %v", err)
+	}
+	if cf || sf {
+		t.Errorf("client-full=%v server-full=%v against a cover with no full profile", cf, sf)
+	}
+	if mem.Tracked() != 0 {
+		t.Error("a degraded connection was recorded as a completed full handshake; it would never retry")
+	}
+}
+
+// The same degradation for a pool that cannot carry the ticket -- the non-ECH
+// pool docs/ech.md keeps as an escape hatch. Connectivity must survive it.
+func TestContactsDegradeWhenThePoolCannotCarryTheTicket(t *testing.T) {
+	k := ticketKey(t)
+	cover := fullCover(t)
+	mem := NewContactMemory(time.Hour, 0)
+	cred, err := k.Issue(320, cover.TicketLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	none := [][]byte{stripECH(t, DefaultPool()[0]), stripECH(t, DefaultPool()[1])}
+
+	cf, _, err := dialOnce(t, k, cover,
+		ClientConfig{Pool: none, Cover: cover, Credential: cred, Contacts: mem},
+		NewReplayCache(64, time.Hour))
+	if err != nil {
+		t.Fatalf("a pool with no carrier refused the connection instead of degrading: %v", err)
+	}
+	if cf {
+		t.Error("claimed a full handshake from a pool that cannot carry the ticket")
+	}
+	if mem.Tracked() != 0 {
+		t.Error("a degraded connection was recorded")
+	}
+}
+
+// A full handshake that FAILED established no relationship, so it must not be
+// recorded. Recording on attempt rather than completion is the subtle version
+// of the bug this whole mechanism exists to prevent: the next connection would
+// resume against an egress the censor never saw a completed handshake with,
+// which is exactly the structurally impossible shape.
+func TestContactsRecordOnlyCompletedHandshakes(t *testing.T) {
+	k := ticketKey(t)
+	cover := fullCover(t)
+	mem := NewContactMemory(time.Hour, 0)
+	cred, err := k.Issue(330, cover.TicketLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A server that reads the opening and then hangs up, so the client's full
+	// handshake reaches the wire but never completes.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, aerr := ln.Accept()
+		if aerr != nil {
+			return
+		}
+		c.SetDeadline(time.Now().Add(3 * time.Second))
+		readRecord(c) // consume the ClientHello, answer nothing
+		c.Close()
+	}()
+
+	raw, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	raw.SetDeadline(time.Now().Add(3 * time.Second))
+	local, remote := raw.LocalAddr(), raw.RemoteAddr()
+
+	if _, _, err := Client(raw, ClientConfig{
+		Pool: pool(t), Cover: cover, Credential: cred, Contacts: mem,
+	}); err == nil {
+		t.Fatal("the client reported success against a server that answered nothing")
+	}
+
+	if mem.Tracked() != 0 {
+		t.Errorf("a failed full handshake was recorded (%d contacts)", mem.Tracked())
+	}
+	if !mustNeedFull(mem, local, remote, time.Now()) {
+		t.Error("after a FAILED full handshake the next connection would resume, with no completed predecessor for a censor to have seen")
+	}
+}
+
+// The degradation case that will actually happen in production, and the one the
+// other two degrade tests missed.
+//
+// CredentialFromWire leaves the companion ticket nil, so every client
+// provisioned before lantern-cloud emits full_ticket is resumption-only. If the
+// contact memory can flip to a full handshake without checking the credential,
+// Twiddle then refuses the connection -- so enabling Contacts ahead of
+// provisioning would break every connection rather than quietly resuming.
+func TestContactsDegradeWhenTheCredentialHasNoCompanion(t *testing.T) {
+	k := ticketKey(t)
+	cover := fullCover(t)
+	mem := NewContactMemory(time.Hour, 0)
+
+	issued, err := k.Issue(340, cover.TicketLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exactly what CredentialFromWire produces.
+	cred, err := CredentialFromWire(issued.Ticket, issued.PSK[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cred.FullTicket != nil {
+		t.Fatal("CredentialFromWire produced a companion ticket; this test proves nothing")
+	}
+
+	cf, sf, err := dialOnce(t, k, cover,
+		ClientConfig{Pool: pool(t), Cover: cover, Credential: cred, Contacts: mem},
+		NewReplayCache(64, time.Hour))
+	if err != nil {
+		t.Fatalf("a resumption-only credential was refused instead of degrading: %v", err)
+	}
+	if cf || sf {
+		t.Errorf("client-full=%v server-full=%v from a credential with no companion ticket", cf, sf)
+	}
+	if mem.Tracked() != 0 {
+		t.Error("a degraded connection was recorded")
+	}
+}
+
+// Client(nil, cfg) is how several tests exercise config validation without a
+// socket, so raw is not dereferenced until every config check has run. The
+// Contacts decision reads raw.LocalAddr(), which put a dereference inside that
+// region -- with Contacts set, a nil conn panicked instead of erroring.
+//
+// Both halves of the contract are asserted, because a fix that only stopped the
+// panic could easily have reported "nil connection" for a config error too.
+func TestClientReportsANilConnectionRatherThanPanicking(t *testing.T) {
+	k := ticketKey(t)
+	cover := fullCover(t)
+	cred, err := k.Issue(350, cover.TicketLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("with Contacts set, a nil conn errors", func(t *testing.T) {
+		_, _, err := Client(nil, ClientConfig{
+			Pool: pool(t), Cover: cover, Credential: cred,
+			Contacts: NewContactMemory(time.Hour, 0),
+		})
+		if err == nil {
+			t.Fatal("a nil connection was accepted")
+		}
+		if !contains(err.Error(), "nil connection") {
+			t.Errorf("unhelpful error: %v", err)
+		}
+	})
+
+	t.Run("a config error still wins over the nil conn", func(t *testing.T) {
+		// Same nil conn, but the credential does not match the cover. The
+		// config error is the useful one and must be what comes back.
+		bad, err := k.Issue(351, cover.TicketLen+1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, err = Client(nil, ClientConfig{
+			Pool: pool(t), Cover: cover, Credential: bad,
+			Contacts: NewContactMemory(time.Hour, 0),
+		})
+		if err == nil {
+			t.Fatal("a mismatched credential was accepted")
+		}
+		if !contains(err.Error(), "ticket length") {
+			t.Errorf("got %q, want the config error rather than the nil-conn one", err)
+		}
+	})
+}
+
+// The rotation record's length check must be EXACT, and this drives the real
+// readTickets rather than a reconstruction of its predicate.
+//
+// The body writeTickets emits is precisely u16 ‖ ticket ‖ psk, and the padding
+// writeSized adds is stripped back off by decryptRecord, so a legitimate body
+// is exactly 2+tl+32 bytes. The check used to be `2+tl+32 > len(body)`, which
+// sounds conservative and is not: it accepts anything whose first two bytes
+// encode a small number, which is exactly what a tunnel's own payload looks
+// like. An HTTP/2 frame's first two bytes are the TOP 16 bits of a 24-bit
+// length, so for any frame under 64 KiB they are tiny, and over 200k samples
+// the loose check accepted 100% of them.
+//
+// Note what this is and is not. The inner content type lives inside the AEAD
+// plaintext, so an adversary cannot choose it without the session keys. Both
+// this and the content-type check are assertions about our OWN endpoints -- a
+// tripwire on the ordering invariant writeTickets relies on -- not defences
+// against a third party.
+func TestReadTicketsRejectsALooseButInexactBody(t *testing.T) {
+	cover := mustCover(t, "www.microsoft.com")
+	newSess := func() *Session {
+		sess, err := DeriveSession(make([]byte, 32), make([]byte, 32), cover.CipherSuite)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sess
+	}
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+	w, err := NewConn(server, newSess(), false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewConn(client, newSess(), true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// An HTTP/2-frame-shaped body, sent as a HANDSHAKE record so the content
+	// type check cannot be what rejects it. 24-bit length, type, flags,
+	// 32-bit stream id -- the first two bytes are therefore 0x00 0x00.
+	const size = 300
+	body := make([]byte, size)
+	rand.Read(body)
+	n := size - 9
+	body[0], body[1], body[2] = byte(n>>16), byte(n>>8), byte(n)
+
+	// It satisfies the OLD loose predicate, which is what makes this a
+	// regression test rather than a tautology.
+	if got := 2 + int(binary.BigEndian.Uint16(body[0:2])) + 32; got > len(body) {
+		t.Fatalf("body does not satisfy the loose check (%d > %d); the test proves nothing", got, len(body))
+	}
+
+	// A well-formed COMPANION record follows, so a loosened check produces a
+	// bogus credential and no error rather than blocking on a record that never
+	// arrives. A hang is not a test failure, so the mutation has to be able to
+	// reach a verdict.
+	companion := make([]byte, 2+FullTicketLen)
+	companion[0], companion[1] = byte(FullTicketLen>>8), byte(FullTicketLen)
+	rand.Read(companion[2:])
+
+	go func() {
+		_ = w.writeSized(contentHandshake, body, sessionTicketWire)
+		_ = w.writeSized(contentHandshake, companion, sessionTicketWire)
+	}()
+
+	got, err := readTickets(r)
+	if err == nil {
+		t.Errorf("readTickets accepted an HTTP/2-shaped body as a rotated credential (ticket %d bytes, psk from the payload); the length check is loose again",
+			len(got.Ticket))
+	}
+}
+
+// The companion record's length check must be exact too.
+//
+// Its hole is narrower than the first record's, because `fl != FullTicketLen`
+// already pins the declared length to 144 -- so a loose body check only admits
+// a body of 146 bytes or more that happens to start 0x00 0x90. Narrower is not
+// closed, and an untested guarantee is not one.
+func TestReadTicketsRejectsAnOversizedCompanionBody(t *testing.T) {
+	cover := mustCover(t, "www.microsoft.com")
+	newSess := func() *Session {
+		sess, err := DeriveSession(make([]byte, 32), make([]byte, 32), cover.CipherSuite)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sess
+	}
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+	w, err := NewConn(server, newSess(), false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewConn(client, newSess(), true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A valid first record, so only the companion is under test.
+	const tl = 176
+	first := make([]byte, 2+tl+32)
+	first[0], first[1] = byte(tl>>8), byte(tl)
+	rand.Read(first[2:])
+
+	// A companion declaring the right length but carrying more than that:
+	// passes `2+fl > len(body)`, fails exact equality.
+	companion := make([]byte, 2+FullTicketLen+64)
+	companion[0], companion[1] = byte(FullTicketLen>>8), byte(FullTicketLen)
+	rand.Read(companion[2:])
+	if 2+FullTicketLen > len(companion) {
+		t.Fatal("companion does not satisfy the loose check; the test proves nothing")
+	}
+
+	go func() {
+		_ = w.writeSized(contentHandshake, first, sessionTicketWire)
+		_ = w.writeSized(contentHandshake, companion, sessionTicketWire)
+	}()
+
+	if _, err := readTickets(r); err == nil {
+		t.Error("readTickets accepted a companion record carrying more than it declared; the companion length check is loose again")
+	}
+}
+
+// End to end, so the exact check is proved against what writeTickets and
+// decryptRecord actually produce rather than against a reconstruction of it.
+// Padding is the thing that would break exact equality, and only a real
+// round trip exercises it.
+func TestRotationSurvivesTheExactLengthCheckForEveryCover(t *testing.T) {
+	k := ticketKey(t)
+	for _, host := range MeasuredCovers() {
+		t.Run(host, func(t *testing.T) {
+			cover := mustCover(t, host)
+			cred, err := k.Issue(400, cover.TicketLen)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ln.Close()
+			go func() {
+				c, aerr := ln.Accept()
+				if aerr != nil {
+					return
+				}
+				defer c.Close()
+				c.SetDeadline(time.Now().Add(5 * time.Second))
+				Server(c, ServerConfig{
+					TicketKey: k, Cover: cover,
+					MaxAge: time.Hour, Replay: NewReplayCache(16, time.Hour),
+				})
+			}()
+			raw, err := net.Dial("tcp", ln.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer raw.Close()
+			raw.SetDeadline(time.Now().Add(5 * time.Second))
+
+			_, next, err := Client(raw, ClientConfig{
+				Pool: pool(t), Cover: cover, Credential: cred,
+			})
+			if err != nil {
+				t.Fatalf("rotation failed the exact length check for a %d-byte ticket: %v", cover.TicketLen, err)
+			}
+			if len(next.Ticket) != cover.TicketLen {
+				t.Errorf("rotated ticket is %d bytes, want %d", len(next.Ticket), cover.TicketLen)
+			}
+			if len(next.FullTicket) != FullTicketLen {
+				t.Errorf("rotated companion is %d bytes, want %d", len(next.FullTicket), FullTicketLen)
+			}
+		})
 	}
 }

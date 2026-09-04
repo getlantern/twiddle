@@ -223,6 +223,12 @@ traffic — prior art worth reading before implementing the ticket path here. It
 theatrical opening as a resumption hello: that decision does not depend on the 4.1%, and the operational
 half of it is already proven in production.
 
+> **Amended.** The layer distinction above holds, but the conclusion drawn from it was too strong: the
+> censor does not see layers, so our outer connection sits in the same observed population as every inner
+> one. `docs/full-handshake-carrier.md` works the argument through and lands somewhere narrower than "match
+> 4%" — the anomaly is *exclusivity*, a client that reaches a host already holding a ticket and never once
+> completes a full handshake with it. Read that document alongside this section.
+
 **But do not carry the TLS version over.** http-proxy uses TLS 1.2, and for this transport 1.3 is strictly
 better: Xue's classifier is *more* precise against 1.2 (`Wb=5`, more consecutive elements must match, lower
 FPR) and the paper says explicitly that it is "in censors' interest to focus on TLS 1.2." TLS 1.2 also puts

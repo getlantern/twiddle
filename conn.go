@@ -133,7 +133,22 @@ type Conn struct {
 	recvSeq uint64
 	pending []byte
 	rerr    error
+
+	// fullHandshake records which opening shape this connection used. Set once
+	// by Client or Server before the connection is handed out, and read-only
+	// after, so it needs no lock.
+	fullHandshake bool
 }
+
+// FullHandshake reports whether this connection opened with a full handshake
+// rather than a resumption.
+//
+// Exposed for measurement. The point of the full-handshake carrier is to stop
+// emitting 100% resumptions (see docs/full-handshake-carrier.md), and the only
+// way to know the deployed mix is to count it -- a ContactMemory that silently
+// degraded on every connection, because no cover was ever probed, would
+// otherwise look exactly like one that was working.
+func (c *Conn) FullHandshake() bool { return c.fullHandshake }
 
 // NewConn wraps raw. isClient selects which direction's keys are used to send.
 func NewConn(raw net.Conn, s *Session, isClient bool, sh Shaper) (*Conn, error) {

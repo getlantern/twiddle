@@ -188,3 +188,74 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+// A credential's two tickets must both be spendable.
+//
+// The gate refuses a ticket older than the client's newest, so if Issue sealed
+// the companion even a second apart from the resumption ticket, whichever path
+// the client used SECOND would be read as a stale capture and refused. That
+// failure would be invisible in unit tests of either path alone: each works,
+// and only using both breaks.
+func TestBothTicketsOfOneCredentialAreSpendable(t *testing.T) {
+	k := ticketKey(t)
+	c := NewReplayCache(0, 0)
+
+	cred, err := k.Issue(21, DefaultTicketLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _, issued, err := k.Open(cred.Ticket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fid, _, fullIssued, err := k.Open(cred.FullTicket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != fid {
+		t.Fatalf("the two tickets carry different clientIDs (%d, %d); they are two clients, not one", id, fid)
+	}
+
+	if !c.Consume(id, issued, cred.Ticket) {
+		t.Fatal("the resumption ticket was refused")
+	}
+	if !c.Consume(fid, fullIssued, cred.FullTicket) {
+		t.Error("the full-handshake companion was refused after the resumption ticket; their issue times disagree")
+	}
+	// Each is still single-use.
+	if c.Consume(fid, fullIssued, cred.FullTicket) {
+		t.Error("a replay of the full ticket was accepted")
+	}
+}
+
+// IssueFullFor upgrades a resumption-only credential, and must take every
+// field from the ticket it companions -- including the issue time, or it
+// recreates the bug above.
+func TestIssueFullForMatchesTheTicketItCompanions(t *testing.T) {
+	k := ticketKey(t)
+	old, err := k.issueAt(31, DefaultTicketLen, time.Now().Add(-3*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, err := k.IssueFullFor(old.Ticket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, psk, issued, err := k.Open(full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantID, wantPSK, wantIssued, err := k.Open(old.Ticket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != wantID {
+		t.Errorf("clientID %d, want %d", id, wantID)
+	}
+	if psk != wantPSK {
+		t.Error("companion carries a different psk")
+	}
+	if !issued.Equal(wantIssued) {
+		t.Errorf("companion issued %v, want %v -- the replay gate would refuse whichever is used second", issued, wantIssued)
+	}
+}

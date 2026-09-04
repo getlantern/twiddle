@@ -1,0 +1,84 @@
+Do the cover identities publish an ECHConfig? (No. None of them.)
+
+  tool     dig +short HTTPS <host> @<resolver>
+  date     2026-09-03
+  method   query the HTTPS RR (TYPE65) for each cover host across three
+           independent public resolvers and look for the ech= SvcParam.
+           crypto.cloudflare.com is the POSITIVE CONTROL: it is Cloudflare's
+           ECH demo host and is known to publish one, so a run that does not
+           flag it has a broken method rather than a negative result.
+
+Why this was measured: docs/full-handshake-carrier.md proposes carrying the
+ticket in the GREASE ECH payload, whose length is drawn from the four buckets
+arrival-chrome152.log measured (extension 186/218/250/282, payload
+144/176/208/240). That model only holds while Chrome sends GREASE ECH. A Chrome
+that obtains an ECHConfig sends REAL ECH instead, whose payload length is set by
+the encrypted inner hello rather than by echGREASELengths -- which would make
+the carrier's length model wrong. arrival-chrome152.log could not settle this:
+it captured hellos to a bare IP literal with no DNS at all, so real ECH was
+impossible by construction there.
+
+RESULTS
+
+  resolver 1.1.1.1
+    www.cloudflare.com       no ech= param
+    www.google.com           no ech= param
+    www.microsoft.com        no ech= param
+    crypto.cloudflare.com    ECH PUBLISHED      <- positive control
+
+  resolver 8.8.8.8
+    www.cloudflare.com       no ech= param
+    www.google.com           no ech= param
+    www.microsoft.com        no ech= param
+    crypto.cloudflare.com    ECH PUBLISHED      <- positive control
+
+  resolver 9.9.9.9
+    www.cloudflare.com       no ech= param
+    www.google.com           no ech= param
+    www.microsoft.com        no ech= param
+    crypto.cloudflare.com    ECH PUBLISHED      <- positive control
+
+Raw, for the two that matter most:
+
+  www.cloudflare.com    1 . alpn="h3,h2" ipv4hint=104.16.123.96,104.16.124.96
+                            ipv6hint=2606:4700::6810:7b60,2606:4700::6810:7c60
+  crypto.cloudflare.com 1 . alpn="h2" ipv4hint=162.159.135.79,162.159.136.79
+                            ech=AEX+DQBBwAAgACB9PwKag54xhjMV7Qdb++j+bLnTDMGC5H9P
+                                cW/dD8tkaAAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA=
+                            ipv6hint=2606:4700:7::a29f:874f,2606:4700:7::a29f:884f
+
+  www.google.com        1 . alpn="h2,h3"
+  www.microsoft.com     CNAME chain to e13678.dscb.akamaiedge.net, no ech=
+
+FINDINGS
+
+1. None of the three cover identities publishes an ECHConfig. A Chrome with
+   secure DNS fully working still cannot fetch one for them, so it sends GREASE
+   ECH. The carrier's length model holds.
+
+2. This is a STRONGER result than the argument in docs/ech.md, which reaches
+   the same conclusion for in-region clients by a different route -- China
+   censors encrypted DNS resolvers, so no ECHConfig is fetched. That reasoning
+   is contingent on the censor. This one is not: the config does not exist to
+   fetch, so GREASE holds for an unrestricted client too, and the carrier does
+   not depend on the censorship it is meant to survive.
+
+3. Note that www.cloudflare.com itself does not enable ECH -- only the demo
+   host does. Cloudflare has enabled and then rolled back ECH for customer
+   zones before, so this is a MONITORABLE condition, not a permanent one.
+
+CAVEAT
+
+Not measured here: what a real Chrome emits with secure DNS on. This measures
+only that the input real ECH requires is absent. That is sufficient to answer
+the question that was blocking -- no ECHConfig, no real ECH -- but if
+Cloudflare re-enables ECH on customer zones, re-run this and then capture an
+actual Chrome hello before trusting echGREASELengths for a cloudflare cover.
+
+MONITOR
+
+  dig +short HTTPS www.cloudflare.com | grep -q 'ech=' && echo "ECH now published"
+
+Run it against each cover identity. A hit means the GREASE payload-length model
+no longer describes what a real Chrome sends to that host, and the carrier's
+fidelity claim needs re-measuring for that cover.

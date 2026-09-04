@@ -35,6 +35,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -100,7 +101,7 @@ func ProbeBoth(ctx context.Context, dial Dialer, host string) (full, resumed tw.
 		return full, resumed, fmt.Errorf("coverprobe %s: resumed handshake: %w", host, err)
 	}
 	if !tap.resumed {
-		return full, resumed, fmt.Errorf("coverprobe %s: upstream did not resume, so this is not the opening we imitate", host)
+		return full, resumed, fmt.Errorf("coverprobe %s: %w, so this is not the opening we imitate", host, ErrNoResume)
 	}
 	if err := readOpening(&resumed, tap, tw.ServerHelloResumedLen, host); err != nil {
 		return full, resumed, err
@@ -278,6 +279,22 @@ func (r *recorder) serverRecords() []record {
 // The baseline is the smallest length seen at each position and the jitter is
 // the observed range. A run where the record COUNT changes between samples is
 // rejected: that is a different server answering, not the same one jittering.
+// ErrNoResume reports that an upstream declined to resume the session it had
+// just issued a ticket for.
+//
+// It is a sentinel because it is the one probe failure that leaves a USABLE
+// result behind: ProbeBoth completes and reads the full opening before it
+// attempts the resumed one, so a result carrying this error has a valid full
+// profile and only an unperformed resumed check.
+//
+// The condition is common rather than rare. Cloudflare declines most of the
+// time -- a second connection lands on a different edge server from the one
+// that issued the ticket, so the ticket does not decrypt and the server falls
+// back to a full handshake. Nothing is wrong with the cover or with us when
+// that happens, which is why SampleFull treats it as success and why retrying
+// it is pointless.
+var ErrNoResume = errors.New("upstream did not resume")
+
 func SampleFull(ctx context.Context, dial Dialer, host string, n int) (tw.ProbeResult, []int, error) {
 	if n < 2 {
 		return tw.ProbeResult{}, nil, fmt.Errorf("coverprobe %s: SampleFull needs at least 2 samples to see a range", host)
@@ -285,8 +302,17 @@ func SampleFull(ctx context.Context, dial Dialer, host string, n int) (tw.ProbeR
 	var base tw.ProbeResult
 	var lo, hi []int
 	for i := 0; i < n; i++ {
+		// What this function measures is the FULL profile. The resumed leg is
+		// ProbeBoth's own consistency check and is not sampled here, so a
+		// sample whose ONLY failure was that the upstream declined to resume
+		// still carries everything being measured, and is accepted.
+		//
+		// This is not leniency for its own sake: requiring the resumed leg made
+		// this unusable against cloudflare, which declines most of the time, so
+		// the check was holding the measurement hostage to a behaviour it was
+		// not measuring. Every other error is still fatal.
 		full, _, err := ProbeBoth(ctx, dial, host)
-		if err != nil {
+		if err != nil && !errors.Is(err, ErrNoResume) {
 			return base, nil, fmt.Errorf("coverprobe %s: sample %d: %w", host, i+1, err)
 		}
 		if i == 0 {
@@ -313,6 +339,10 @@ func SampleFull(ctx context.Context, dial Dialer, host string, n int) (tw.ProbeR
 		jitter[i] = hi[i] - lo[i]
 	}
 	base.Remainder = lo
+	// Carried inside the result as well as returned, so CoverProfile.Adopt gets
+	// the baseline and its range together. Adopting a baseline without the
+	// range is what produces an emitter whose certificate flight never varies.
+	base.RemainderJitter = jitter
 	base.OpeningBurst = tw.ServerHelloFullLen + len(tw.ChangeCipherSpec())
 	for _, v := range lo {
 		base.OpeningBurst += v

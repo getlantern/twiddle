@@ -44,5 +44,9 @@ func main() {
 	}
 	fmt.Printf("ticket_key=%s\n", hex.EncodeToString(k[:]))
 	fmt.Printf("ticket=%s\n", base64.StdEncoding.EncodeToString(cred.Ticket))
+	// The full-handshake companion. Provisioning that omits it leaves the
+	// client resumption-only, which is the distinguisher the carrier exists to
+	// remove -- see docs/full-handshake-carrier.md.
+	fmt.Printf("full_ticket=%s\n", base64.StdEncoding.EncodeToString(cred.FullTicket))
 	fmt.Printf("psk=%s\n", hex.EncodeToString(cred.PSK[:]))
 }
