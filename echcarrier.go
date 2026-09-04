@@ -117,6 +117,32 @@ func (h *ClientHello) ECHPayloadLen() (int, error) {
 	return len(pay), nil
 }
 
+// FullHandshakeCarriers filters a pool to the hellos whose ECH payload can hold
+// a full-handshake ticket.
+//
+// It exists because a pool is not uniform. Device taps copy whatever the
+// browser emitted, so a pool can mix hellos with a 240-byte ECH payload, a
+// 144-byte one, and none at all -- and a client drawing uniformly from that
+// pool would fail on some connections and succeed on others, which is a far
+// worse failure than not offering the path. Callers deciding whether to offer
+// the full handshake at all should check this is non-empty.
+//
+// Unparseable records are skipped rather than reported: the pool loader has
+// already rejected those, and a caller reaching here wants the usable subset.
+func FullHandshakeCarriers(pool [][]byte) [][]byte {
+	var out [][]byte
+	for _, rec := range pool {
+		h, err := ParseClientHello(rec)
+		if err != nil {
+			continue
+		}
+		if n, err := h.ECHPayloadLen(); err == nil && n >= FullTicketLen {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
 // SetECHTicketAuth installs a full-handshake authenticator: the ticket goes in
 // the ECH payload, and the MAC over the finished hello goes in random.
 //

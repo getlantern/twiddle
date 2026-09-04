@@ -705,3 +705,75 @@ func TestFullHandshakeRefusesWhatItCannotBack(t *testing.T) {
 		}
 	})
 }
+
+// The regression the pool filter exists for. With one carrier among many
+// hellos that cannot carry a ticket, a client drawing uniformly succeeds only
+// about a sixth of the time; the failure depends on the draw, so it would
+// present as a flaky connection rather than a broken configuration.
+func TestClientAlwaysPicksACarrierFromAMixedPool(t *testing.T) {
+	k := ticketKey(t)
+	cover := fullCover(t)
+	base := DefaultPool()[0]
+	mixed := [][]byte{
+		stripECH(t, base),
+		shrinkECH(t, base, FullTicketLen-1),
+		shrinkECH(t, base, 16),
+		shrinkECH(t, base, 100),
+		stripECH(t, base),
+		base, // the only carrier
+	}
+
+	for i := 0; i < 12; i++ {
+		cred, err := k.Issue(uint64(200+i), cover.TicketLen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		go func() {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close()
+			c.SetDeadline(time.Now().Add(5 * time.Second))
+			Server(c, ServerConfig{
+				TicketKey: k, Cover: cover,
+				MaxAge: time.Hour, Replay: NewReplayCache(16, time.Hour),
+			})
+		}()
+		raw, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			ln.Close()
+			t.Fatal(err)
+		}
+		_, _, err = Client(raw, ClientConfig{
+			Pool: mixed, Cover: cover, Credential: cred, FullHandshake: true,
+		})
+		raw.Close()
+		ln.Close()
+		if err != nil {
+			t.Fatalf("attempt %d of 12 failed: %v -- the pool draw is not restricted to carriers", i+1, err)
+		}
+	}
+}
+
+// And a pool with no carrier at all must fail clearly, not on the draw.
+func TestFullHandshakeWithNoCarrierInThePoolFailsClearly(t *testing.T) {
+	k := ticketKey(t)
+	cover := fullCover(t)
+	cred, _ := k.Issue(210, cover.TicketLen)
+	none := [][]byte{stripECH(t, DefaultPool()[0]), shrinkECH(t, DefaultPool()[0], 32)}
+
+	_, _, err := Client(nil, ClientConfig{
+		Pool: none, Cover: cover, Credential: cred, FullHandshake: true,
+	})
+	if err == nil {
+		t.Fatal("a full handshake was attempted from a pool with no carrier")
+	}
+	if !contains(err.Error(), "ECH payload") {
+		t.Errorf("unhelpful error: %v", err)
+	}
+}

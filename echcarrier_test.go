@@ -351,3 +351,79 @@ func TestECHCarrierEmitsAFullHandshakeShape(t *testing.T) {
 		t.Errorf("only saw payload lengths %v over 200 emissions; the length is not varying", seen)
 	}
 }
+
+// shrinkECH rewrites a hello's ECH payload to n bytes, standing in for a pool
+// hello from a browser whose ECH is too small to carry a ticket.
+func shrinkECH(t *testing.T, rec []byte, n int) []byte {
+	t.Helper()
+	h, err := ParseClientHello(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := h.Find(ExtECH)
+	if e == nil {
+		t.Fatal("hello has no ECH to shrink")
+	}
+	pay, err := echPayload(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := len(e.Data) - len(pay) - 2
+	d := append([]byte(nil), e.Data[:head]...)
+	d = append(d, byte(n>>8), byte(n))
+	d = append(d, make([]byte, n)...)
+	e.Data = d
+	if got, err := h.ECHPayloadLen(); err != nil || got != n {
+		t.Fatalf("shrink produced %d (%v), want %d", got, err, n)
+	}
+	return h.Marshal()
+}
+
+// stripECH removes the ECH extension entirely, standing in for the non-ECH
+// pool docs/ech.md keeps as an escape hatch.
+func stripECH(t *testing.T, rec []byte) []byte {
+	t.Helper()
+	h, err := ParseClientHello(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !h.dropExtension(ExtECH) {
+		t.Fatal("hello had no ECH to strip")
+	}
+	return h.Marshal()
+}
+
+// A pool is not uniform: a device tap copies whatever the browser emitted, so
+// hellos that can carry a ticket sit alongside hellos that cannot. Drawing
+// uniformly from the whole pool would fail on SOME connections and succeed on
+// others -- an intermittent failure far worse than not offering the path.
+func TestFullHandshakeCarriersFiltersThePool(t *testing.T) {
+	base := DefaultPool()[0] // 240-byte payload
+	good := helloWithECHPayload(t, 144)
+
+	mixed := [][]byte{
+		stripECH(t, base),
+		shrinkECH(t, base, FullTicketLen-1),
+		base,
+		shrinkECH(t, base, 16),
+		good.Marshal(),
+		[]byte("not a hello at all"),
+	}
+	got := FullHandshakeCarriers(mixed)
+	if len(got) != 2 {
+		t.Fatalf("kept %d of 6 hellos, want the 2 with a large enough ECH payload", len(got))
+	}
+	for _, rec := range got {
+		h, err := ParseClientHello(rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n, err := h.ECHPayloadLen()
+		if err != nil || n < FullTicketLen {
+			t.Errorf("kept a hello with payload %d (%v)", n, err)
+		}
+	}
+	if len(FullHandshakeCarriers([][]byte{stripECH(t, base)})) != 0 {
+		t.Error("a pool with no usable ECH was reported as able to carry the full handshake")
+	}
+}

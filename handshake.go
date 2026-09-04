@@ -86,12 +86,22 @@ func Client(raw net.Conn, cfg ClientConfig) (*Conn, *Credential, error) {
 	if cfg.FullHandshake {
 		remainder = cfg.Cover.FullRemainder
 	}
-	pick, err := rand.Int(rand.Reader, bigLen(len(cfg.Pool)))
+	// The full path can only use hellos whose ECH payload holds a ticket, and a
+	// pool is not uniform -- a device tap copies whatever the browser emitted.
+	// Drawing from the whole pool would fail on some connections and succeed on
+	// others, depending on the draw.
+	candidates := cfg.Pool
+	if cfg.FullHandshake {
+		if candidates = FullHandshakeCarriers(cfg.Pool); len(candidates) == 0 {
+			return nil, nil, errors.New("twiddle: no hello in the pool has an ECH payload large enough to carry a full-handshake ticket")
+		}
+	}
+	pick, err := rand.Int(rand.Reader, bigLen(len(candidates)))
 	if err != nil {
 		return nil, nil, err
 	}
 
-	wire, eph, err := Twiddle(cfg.Pool[pick.Int64()], Options{
+	wire, eph, err := Twiddle(candidates[pick.Int64()], Options{
 		CoverSNI:      cfg.Cover.Host,
 		Credential:    cfg.Credential,
 		BinderLen:     cfg.Cover.BinderLen,
