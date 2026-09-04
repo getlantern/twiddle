@@ -105,8 +105,16 @@ func Client(raw net.Conn, cfg ClientConfig) (*Conn, *Credential, error) {
 	// been probed first. The degradation is not recorded, so it keeps trying
 	// rather than latching.
 	full := cfg.FullHandshake
-	if !full && cfg.Contacts.needsFull(raw.LocalAddr(), raw.RemoteAddr(), time.Now()) {
-		full = cfg.Cover.CanEmitFullHandshake() && len(FullHandshakeCarriers(cfg.Pool)) > 0
+	// contactGen is the generation the shape was decided under. record refuses a
+	// write from a different one, so a Reset during the handshake cannot be
+	// undone by the recording that follows it.
+	var contactGen uint64
+	if cfg.Contacts != nil {
+		wantFull, gen := cfg.Contacts.needsFull(raw.LocalAddr(), raw.RemoteAddr(), time.Now())
+		contactGen = gen
+		if !full && wantFull {
+			full = cfg.Cover.CanEmitFullHandshake() && len(FullHandshakeCarriers(cfg.Pool)) > 0
+		}
 	}
 
 	// The remainder record COUNT is what the client reads, so the two shapes
@@ -197,8 +205,8 @@ func Client(raw net.Conn, cfg ClientConfig) (*Conn, *Credential, error) {
 	// Recorded only now, with the opening complete. A full handshake that
 	// failed established no relationship for a later resumption to continue, so
 	// recording it would be the one direction that hurts.
-	if full {
-		cfg.Contacts.record(raw.LocalAddr(), raw.RemoteAddr(), time.Now())
+	if full && cfg.Contacts != nil {
+		cfg.Contacts.record(raw.LocalAddr(), raw.RemoteAddr(), time.Now(), contactGen)
 	}
 	return conn, next, nil
 }

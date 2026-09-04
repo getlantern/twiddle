@@ -33,6 +33,9 @@ type ContactMemory struct {
 	horizon time.Duration
 	max     int
 	seen    map[contactKey]time.Time
+	// gen increments on every Reset, so a handshake that was decided before a
+	// reset cannot write its result after one. See record.
+	gen uint64
 }
 
 // contactKey pairs the egress address with the local one.
@@ -105,6 +108,18 @@ func (m *ContactMemory) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.seen = make(map[contactKey]time.Time)
+	m.gen++
+}
+
+// generation reports the current reset generation. Test-facing: production
+// callers get it from needsFull, paired with the decision it belongs to.
+func (m *ContactMemory) generation() uint64 {
+	if m == nil {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.gen
 }
 
 // Tracked reports how many contacts are remembered.
@@ -136,9 +151,12 @@ func addrKey(a net.Addr) string {
 // both will do a full handshake. That is not a race worth closing: it is what a
 // browser does on every page load, where a parallel burst opens several
 // connections to one origin before any of them has a ticket to resume with.
-func (m *ContactMemory) needsFull(local, remote net.Addr, now time.Time) bool {
+// It also returns the generation the decision was made under, which record
+// requires back. A decision and its recording straddle the whole handshake, so
+// a Reset can land between them; the generation is what makes that observable.
+func (m *ContactMemory) needsFull(local, remote net.Addr, now time.Time) (bool, uint64) {
 	if m == nil {
-		return false
+		return false, 0
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -149,18 +167,36 @@ func (m *ContactMemory) needsFull(local, remote net.Addr, now time.Time) bool {
 	// green. That is deliberate: eviction bounds the state and this comparison
 	// bounds the answer, so making eviction periodic or lazy later cannot
 	// silently extend how long a relationship is trusted for.
-	return !ok || now.Sub(last) >= m.horizon
+	return !ok || now.Sub(last) >= m.horizon, m.gen
 }
 
 // record notes a COMPLETED full handshake. Only completed ones count: a
 // handshake that failed established no relationship for a later resumption to
 // continue.
-func (m *ContactMemory) record(local, remote net.Addr, now time.Time) {
+//
+// gen must be the value needsFull returned when this handshake's shape was
+// chosen. A mismatch means Reset ran while the handshake was in flight, and the
+// write is DROPPED.
+//
+// That interval is the whole handshake, so the window is not small. Without the
+// guard, a network change detected mid-handshake would be undone by the
+// recording that followed it: the entry would reappear for an address pair the
+// new observer has no history of, and the next connection would resume with no
+// predecessor it can see. The local address usually changes with the network
+// and saves us, but not always -- two networks can both hand out 192.168.1.5,
+// which is exactly the case Reset exists to cover.
+//
+// Dropping the write costs one extra full handshake on the next connection,
+// which is the direction everything here errs in.
+func (m *ContactMemory) record(local, remote net.Addr, now time.Time, gen uint64) {
 	if m == nil {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if gen != m.gen {
+		return
+	}
 	m.seen[contactKey{addrKey(local), addrKey(remote)}] = now
 	m.evictLocked(now)
 }

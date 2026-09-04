@@ -987,7 +987,7 @@ func TestContactsRecordOnlyCompletedHandshakes(t *testing.T) {
 	if mem.Tracked() != 0 {
 		t.Errorf("a failed full handshake was recorded (%d contacts)", mem.Tracked())
 	}
-	if !mem.needsFull(local, remote, time.Now()) {
+	if !mustNeedFull(mem, local, remote, time.Now()) {
 		t.Error("after a FAILED full handshake the next connection would resume, with no completed predecessor for a censor to have seen")
 	}
 }
