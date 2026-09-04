@@ -1079,3 +1079,181 @@ func TestClientReportsANilConnectionRatherThanPanicking(t *testing.T) {
 		}
 	})
 }
+
+// The rotation record's length check must be EXACT, and this drives the real
+// readTickets rather than a reconstruction of its predicate.
+//
+// The body writeTickets emits is precisely u16 ‖ ticket ‖ psk, and the padding
+// writeSized adds is stripped back off by decryptRecord, so a legitimate body
+// is exactly 2+tl+32 bytes. The check used to be `2+tl+32 > len(body)`, which
+// sounds conservative and is not: it accepts anything whose first two bytes
+// encode a small number, which is exactly what a tunnel's own payload looks
+// like. An HTTP/2 frame's first two bytes are the TOP 16 bits of a 24-bit
+// length, so for any frame under 64 KiB they are tiny, and over 200k samples
+// the loose check accepted 100% of them.
+//
+// Note what this is and is not. The inner content type lives inside the AEAD
+// plaintext, so an adversary cannot choose it without the session keys. Both
+// this and the content-type check are assertions about our OWN endpoints -- a
+// tripwire on the ordering invariant writeTickets relies on -- not defences
+// against a third party.
+func TestReadTicketsRejectsALooseButInexactBody(t *testing.T) {
+	cover := mustCover(t, "www.microsoft.com")
+	newSess := func() *Session {
+		sess, err := DeriveSession(make([]byte, 32), make([]byte, 32), cover.CipherSuite)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sess
+	}
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+	w, err := NewConn(server, newSess(), false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewConn(client, newSess(), true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// An HTTP/2-frame-shaped body, sent as a HANDSHAKE record so the content
+	// type check cannot be what rejects it. 24-bit length, type, flags,
+	// 32-bit stream id -- the first two bytes are therefore 0x00 0x00.
+	const size = 300
+	body := make([]byte, size)
+	rand.Read(body)
+	n := size - 9
+	body[0], body[1], body[2] = byte(n>>16), byte(n>>8), byte(n)
+
+	// It satisfies the OLD loose predicate, which is what makes this a
+	// regression test rather than a tautology.
+	if got := 2 + int(binary.BigEndian.Uint16(body[0:2])) + 32; got > len(body) {
+		t.Fatalf("body does not satisfy the loose check (%d > %d); the test proves nothing", got, len(body))
+	}
+
+	// A well-formed COMPANION record follows, so a loosened check produces a
+	// bogus credential and no error rather than blocking on a record that never
+	// arrives. A hang is not a test failure, so the mutation has to be able to
+	// reach a verdict.
+	companion := make([]byte, 2+FullTicketLen)
+	companion[0], companion[1] = byte(FullTicketLen>>8), byte(FullTicketLen)
+	rand.Read(companion[2:])
+
+	go func() {
+		_ = w.writeSized(contentHandshake, body, sessionTicketWire)
+		_ = w.writeSized(contentHandshake, companion, sessionTicketWire)
+	}()
+
+	got, err := readTickets(r)
+	if err == nil {
+		t.Errorf("readTickets accepted an HTTP/2-shaped body as a rotated credential (ticket %d bytes, psk from the payload); the length check is loose again",
+			len(got.Ticket))
+	}
+}
+
+// The companion record's length check must be exact too.
+//
+// Its hole is narrower than the first record's, because `fl != FullTicketLen`
+// already pins the declared length to 144 -- so a loose body check only admits
+// a body of 146 bytes or more that happens to start 0x00 0x90. Narrower is not
+// closed, and an untested guarantee is not one.
+func TestReadTicketsRejectsAnOversizedCompanionBody(t *testing.T) {
+	cover := mustCover(t, "www.microsoft.com")
+	newSess := func() *Session {
+		sess, err := DeriveSession(make([]byte, 32), make([]byte, 32), cover.CipherSuite)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sess
+	}
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+	w, err := NewConn(server, newSess(), false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewConn(client, newSess(), true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A valid first record, so only the companion is under test.
+	const tl = 176
+	first := make([]byte, 2+tl+32)
+	first[0], first[1] = byte(tl>>8), byte(tl)
+	rand.Read(first[2:])
+
+	// A companion declaring the right length but carrying more than that:
+	// passes `2+fl > len(body)`, fails exact equality.
+	companion := make([]byte, 2+FullTicketLen+64)
+	companion[0], companion[1] = byte(FullTicketLen>>8), byte(FullTicketLen)
+	rand.Read(companion[2:])
+	if 2+FullTicketLen > len(companion) {
+		t.Fatal("companion does not satisfy the loose check; the test proves nothing")
+	}
+
+	go func() {
+		_ = w.writeSized(contentHandshake, first, sessionTicketWire)
+		_ = w.writeSized(contentHandshake, companion, sessionTicketWire)
+	}()
+
+	if _, err := readTickets(r); err == nil {
+		t.Error("readTickets accepted a companion record carrying more than it declared; the companion length check is loose again")
+	}
+}
+
+// End to end, so the exact check is proved against what writeTickets and
+// decryptRecord actually produce rather than against a reconstruction of it.
+// Padding is the thing that would break exact equality, and only a real
+// round trip exercises it.
+func TestRotationSurvivesTheExactLengthCheckForEveryCover(t *testing.T) {
+	k := ticketKey(t)
+	for _, host := range MeasuredCovers() {
+		t.Run(host, func(t *testing.T) {
+			cover := mustCover(t, host)
+			cred, err := k.Issue(400, cover.TicketLen)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ln.Close()
+			go func() {
+				c, aerr := ln.Accept()
+				if aerr != nil {
+					return
+				}
+				defer c.Close()
+				c.SetDeadline(time.Now().Add(5 * time.Second))
+				Server(c, ServerConfig{
+					TicketKey: k, Cover: cover,
+					MaxAge: time.Hour, Replay: NewReplayCache(16, time.Hour),
+				})
+			}()
+			raw, err := net.Dial("tcp", ln.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer raw.Close()
+			raw.SetDeadline(time.Now().Add(5 * time.Second))
+
+			_, next, err := Client(raw, ClientConfig{
+				Pool: pool(t), Cover: cover, Credential: cred,
+			})
+			if err != nil {
+				t.Fatalf("rotation failed the exact length check for a %d-byte ticket: %v", cover.TicketLen, err)
+			}
+			if len(next.Ticket) != cover.TicketLen {
+				t.Errorf("rotated ticket is %d bytes, want %d", len(next.Ticket), cover.TicketLen)
+			}
+			if len(next.FullTicket) != FullTicketLen {
+				t.Errorf("rotated companion is %d bytes, want %d", len(next.FullTicket), FullTicketLen)
+			}
+		})
+	}
+}

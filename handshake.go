@@ -398,11 +398,26 @@ func readTickets(c *Conn) (*Credential, error) {
 	if err != nil {
 		return nil, err
 	}
-	// writeTickets emits contentHandshake and nothing else, so accepting
-	// application_data here only widens what can be mistaken for a credential.
-	// After the opening the tunnel carries app-data records; if the ordering
-	// ever shifts, a lenient check would parse the first of them as a rotated
-	// ticket instead of failing loudly.
+	// Both checks below are assertions about OUR OWN endpoints, not defences
+	// against an adversary. The inner content type lives inside the AEAD
+	// plaintext (see writeRecord), so forging a contentHandshake record needs
+	// the session keys, and anyone holding those owns the connection already.
+	//
+	// What they defend against is self-inflicted confusion. Ordering is
+	// structurally guaranteed today -- writeTickets completes before Server
+	// hands the conn to its caller, so no application can write ahead of it --
+	// and these checks are the tripwire if that ever stops being true.
+	//
+	// The length check is EXACT because a loose one turned out to carry no
+	// weight. writeTickets emits precisely u16 ‖ ticket ‖ psk, and the padding
+	// writeSized adds is stripped back off by decryptRecord, so a legitimate
+	// body is exactly 2+tl+32 bytes. Against `2+tl+32 > len(body)`, measured
+	// over 200k samples: an HTTP/2-frame-shaped body -- which is what a tunnel
+	// actually carries -- was accepted 100% of the time, because a frame's
+	// first two bytes are the top 16 bits of a 24-bit length and are therefore
+	// tiny. Uniform random bodies were accepted 3% of the time. Exact equality
+	// takes both to ~0, so a stray app-data record fails here rather than
+	// yielding a credential with a psk read out of someone's payload.
 	if typ != contentHandshake {
 		return nil, errMalformed
 	}
@@ -410,7 +425,7 @@ func readTickets(c *Conn) (*Credential, error) {
 		return nil, errMalformed
 	}
 	tl := int(binary.BigEndian.Uint16(body[0:2]))
-	if 2+tl+32 > len(body) {
+	if len(body) != 2+tl+32 {
 		return nil, errMalformed
 	}
 	cred := &Credential{Ticket: append([]byte(nil), body[2:2+tl]...)}
@@ -427,7 +442,7 @@ func readTickets(c *Conn) (*Credential, error) {
 		return nil, errMalformed
 	}
 	fl := int(binary.BigEndian.Uint16(body[0:2]))
-	if fl != FullTicketLen || 2+fl > len(body) {
+	if fl != FullTicketLen || len(body) != 2+fl {
 		return nil, errMalformed
 	}
 	cred.FullTicket = append([]byte(nil), body[2:2+fl]...)
