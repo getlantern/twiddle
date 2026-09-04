@@ -87,6 +87,12 @@ Prerequisite, and all of it already on main before this work:
 | google | 1215 | 6 | `[3921]` | 5142 |
 | microsoft | 1215 | 6 | `[32, 8273, 286, 74]` | 9886 |
 
+**Since confirmed the hard way.** Re-probing a day later (`harvest/testdata/full-remainder-drift.log`)
+found google's flight had fallen from `[3921]` to `[2619]` — 1302 bytes, a certificate rotation rather
+than signature jitter — while microsoft held exactly and cloudflare moved 2, revealing the
+3846/3847/3848 range that five samples had reported as a jitter of 1. So the "cannot be a constant"
+argument below is no longer just from mechanism, and the useful lifetime of a probed profile is days.
+
 Three consequences:
 
 1. **The remainder is the certificate**, so a faithful full handshake costs **5–10 KB** of opening

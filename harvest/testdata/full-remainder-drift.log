@@ -1,0 +1,46 @@
+The full-handshake remainder drifts, and by more than jitter.
+
+  tool     coverprobe SampleFull, 5 samples per host, via the live CI tests
+  date     2026-09-04
+  baseline harvest/testdata/postflight-full-vs-resumed.log, 2026-09-03
+
+Why this was recorded: docs/full-handshake-carrier.md asserts that
+CoverProfile.FullRemainder "cannot be a constant" and must come from a probe
+against the live upstream. That was an argument from mechanism -- a DER-encoded
+ECDSA signature varies in length, and certificates rotate. Wiring the live
+probes into CI produced the evidence for it within a day.
+
+                    2026-09-03      2026-09-04                  delta
+  cloudflare        [3848]          [3846]  jitter [2]           -2, within jitter
+  google            [3921]          [2619]  jitter [1]           -1302
+  microsoft         [32 8273 286 74] [32 8273 286 74] jitter [0 0 0 0]   0
+
+FINDINGS
+
+1. google's certificate flight fell by 1302 bytes in one day. That is not
+   signature jitter; it is a different certificate chain, most likely a
+   rotation to a shorter one. Any table constant for this cover would now be
+   1302 bytes wrong, and an egress emitting it would be the only host claiming
+   to be google whose certificate flight is a chain google no longer serves.
+
+2. cloudflare moved 2 bytes and reported jitter 2, so this run saw the
+   3846/3847/3848 range that postflight-full-vs-resumed.log recorded as a
+   jitter of 1 from 5 samples. That is the documented consequence of a sampled
+   jitter being a FLOOR rather than a range: more samples widen it, and
+   narrowing it on the strength of one run would be wrong.
+
+3. microsoft held exactly, all four records, jitter zero. Its RSA signature is
+   fixed-length, and its chain did not rotate in this window. Consistent with
+   the earlier measurement.
+
+CONSEQUENCE
+
+Nothing in the shipped code breaks, because FullRemainder is empty in the table
+by design and every emitter is gated on CanEmitFullHandshake. What this does
+settle is the cadence question the design left open: a probed full profile is
+not a one-time startup measurement that can be cached indefinitely. google's
+drift says the useful lifetime of one is days, not weeks.
+
+It also means the numbers quoted in docs and logs are snapshots. They are
+correct as measurements and wrong as expectations, which is why the live tests
+assert ServerHelloFullLen -- a protocol constant -- and NOT the remainder.
