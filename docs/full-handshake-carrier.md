@@ -87,11 +87,13 @@ Prerequisite, and all of it already on main before this work:
 | google | 1215 | 6 | `[3921]` | 5142 |
 | microsoft | 1215 | 6 | `[32, 8273, 286, 74]` | 9886 |
 
-**Since confirmed the hard way.** Re-probing a day later (`harvest/testdata/full-remainder-drift.log`)
-found google's flight had fallen from `[3921]` to `[2619]` — 1302 bytes, a certificate rotation rather
-than signature jitter — while microsoft held exactly and cloudflare moved 2, revealing the
-3846/3847/3848 range that five samples had reported as a jitter of 1. So the "cannot be a constant"
-argument below is no longer just from mechanism, and the useful lifetime of a probed profile is days.
+**Since confirmed the hard way, and more sharply than expected**
+(`harvest/testdata/full-remainder-drift.log`). Probing from two vantage points on the same day, google
+served `[2619]` to a laptop and `[3921]` to a GitHub runner — 1302 bytes apart — while cloudflare and
+microsoft agreed at both. So the remainder is not merely perishable, it is **specific to the probing
+vantage point**: an egress must probe from *itself*, and a profile measured anywhere else can be over a
+kilobyte wrong even where it was correct when taken. That makes the per-egress probing requirement
+load-bearing rather than tidy — inheriting a profile is not a degraded option, it is a wrong one.
 
 Three consequences:
 

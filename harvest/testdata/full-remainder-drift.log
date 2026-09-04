@@ -1,46 +1,65 @@
-The full-handshake remainder drifts, and by more than jitter.
+The full-handshake remainder varies by VANTAGE POINT, not just over time.
 
-  tool     coverprobe SampleFull, 5 samples per host, via the live CI tests
+  tool     coverprobe SampleFull, 5 samples per host
   date     2026-09-04
-  baseline harvest/testdata/postflight-full-vs-resumed.log, 2026-09-03
+  where    two vantage points on the same day -- a laptop on a US residential
+           connection, and a GitHub Actions ubuntu-latest runner
+  baseline harvest/testdata/postflight-full-vs-resumed.log, 2026-09-03, laptop
 
 Why this was recorded: docs/full-handshake-carrier.md asserts that
 CoverProfile.FullRemainder "cannot be a constant" and must come from a probe
 against the live upstream. That was an argument from mechanism -- a DER-encoded
 ECDSA signature varies in length, and certificates rotate. Wiring the live
-probes into CI produced the evidence for it within a day.
+probes into CI produced the evidence, and a stronger form of it than expected.
 
-                    2026-09-03      2026-09-04                  delta
-  cloudflare        [3848]          [3846]  jitter [2]           -2, within jitter
-  google            [3921]          [2619]  jitter [1]           -1302
-  microsoft         [32 8273 286 74] [32 8273 286 74] jitter [0 0 0 0]   0
+                    09-03 laptop     09-04 laptop      09-04 CI runner
+  cloudflare        [3848]           [3846] jitter [2]  [3846] jitter [2]
+  google            [3921]           [2619] jitter [1]  [3921] jitter [0]
+  microsoft         [32 8273 286 74] same, jitter 0     same, jitter 0
 
 FINDINGS
 
-1. google's certificate flight fell by 1302 bytes in one day. That is not
-   signature jitter; it is a different certificate chain, most likely a
-   rotation to a shorter one. Any table constant for this cover would now be
-   1302 bytes wrong, and an egress emitting it would be the only host claiming
-   to be google whose certificate flight is a chain google no longer serves.
+1. google served a 2619-byte certificate flight to the laptop and a 3921-byte
+   one to the CI runner ON THE SAME DAY -- a 1302-byte difference. Two vantage
+   points, two different chains.
 
-2. cloudflare moved 2 bytes and reported jitter 2, so this run saw the
-   3846/3847/3848 range that postflight-full-vs-resumed.log recorded as a
-   jitter of 1 from 5 samples. That is the documented consequence of a sampled
-   jitter being a FLOOR rather than a range: more samples widen it, and
-   narrowing it on the strength of one run would be wrong.
+   A FIRST READING OF THIS WAS WRONG and is corrected here. Seeing only the
+   laptop's 3921 -> 2619 move, this log originally called it a certificate
+   rotation over time. The CI run refutes that: 3921 is still being served,
+   just not to the laptop. The variable is WHERE the probe runs, not when.
 
-3. microsoft held exactly, all four records, jitter zero. Its RSA signature is
-   fixed-length, and its chain did not rotate in this window. Consistent with
-   the earlier measurement.
+   The mechanism is not established from two samples. Plausible causes are a
+   different google edge with a different chain, geographic or ASN-based
+   certificate selection, or a difference in what the two clients offered.
+   Worth pinning down, but the operational consequence does not depend on which.
+
+2. cloudflare and microsoft agree across both vantage points. So this is not a
+   general property of CDNs, it is specific to what a given cover does -- which
+   is itself the argument for measuring each cover rather than reasoning about
+   covers.
+
+3. cloudflare moved 2 bytes from the 09-03 measurement and reported jitter 2 at
+   both vantage points, so both runs saw the 3846/3847/3848 range that five
+   samples had reported as a jitter of 1. That is the documented consequence of
+   a sampled jitter being a FLOOR rather than a range: more samples widen it,
+   and narrowing it on the strength of one run would be wrong.
 
 CONSEQUENCE
 
-Nothing in the shipped code breaks, because FullRemainder is empty in the table
-by design and every emitter is gated on CanEmitFullHandshake. What this does
-settle is the cadence question the design left open: a probed full profile is
-not a one-time startup measurement that can be cached indefinitely. google's
-drift says the useful lifetime of one is days, not weeks.
+This is the sharper version of "FullRemainder cannot be a table constant." It
+is not merely perishable -- it is SPECIFIC TO THE PROBING VANTAGE POINT. An
+egress must probe from itself. A profile measured anywhere else, including one
+measured in CI or shipped in a config, can be over a kilobyte wrong for that
+egress even when it was correct where it was taken.
 
-It also means the numbers quoted in docs and logs are snapshots. They are
-correct as measurements and wrong as expectations, which is why the live tests
-assert ServerHelloFullLen -- a protocol constant -- and NOT the remainder.
+The design already required per-egress probing on startup. This says that
+requirement is load-bearing rather than tidy: inheriting a profile is not a
+degraded option, it is a wrong one.
+
+Nothing in the shipped code breaks, because FullRemainder is empty in the table
+by design and every emitter is gated on CanEmitFullHandshake.
+
+It also means the numbers in the docs and logs are snapshots of one vantage
+point. They are correct as measurements and wrong as expectations, which is why
+the live CI tests assert ServerHelloFullLen -- a protocol constant, 1215 from
+all three covers at both vantage points -- and NOT the remainder.
