@@ -123,6 +123,23 @@ type Conn struct {
 	flushing bool
 	werr     error
 
+	// wireMu serializes record emission, covering the seal and the socket write
+	// as one step.
+	//
+	// It cannot be folded into wmu. Write deliberately RELEASES wmu around each
+	// writeRecord so a slow socket does not block other writers, and guards
+	// re-entry with the flushing flag -- but that flag only excludes Write from
+	// Write. Close takes the freed wmu and reaches writeRecord through
+	// writeSized, so a close_notify could seal concurrently with a data flush.
+	//
+	// Both halves of writeRecord need the same lock, and for different reasons.
+	// The sequence number IS the AEAD nonce, so two sealers taking the same
+	// sendSeq is nonce reuse under one key -- for AES-GCM that is authentication
+	// key recovery, not a decrypt failure. And even with distinct numbers the
+	// records must reach the wire in that order, because the peer decrypts
+	// against its own monotonic counter.
+	wireMu sync.Mutex
+
 	// closeOnce guards the close_notify alert: Close may be called more than
 	// once, and a second alert would itself be the anomaly.
 	closeOnce sync.Once
@@ -217,6 +234,9 @@ func (c *Conn) Write(b []byte) (int, error) {
 }
 
 func (c *Conn) writeRecord(typ byte, payload []byte, padTo int) error {
+	c.wireMu.Lock()
+	defer c.wireMu.Unlock()
+
 	inner := make([]byte, 0, len(payload)+1)
 	inner = append(inner, payload...)
 	inner = append(inner, typ)
