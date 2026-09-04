@@ -1,0 +1,92 @@
+name: Go
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+  # The live job checks our emitted hellos against real servers, so it can
+  # start failing without anybody touching this repo: a cover can rotate its
+  # certificate, change its ServerHello, or stop accepting a shape we send.
+  # A daily run is what turns that from a surprise at deploy time into a
+  # notification.
+  schedule:
+    - cron: "17 6 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  # Everything that needs no network. Kept separate from the live job so a
+  # flaky runner or a blocked egress cannot be mistaken for a code regression.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: "go.mod"
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt'd:"
+            echo "$unformatted"
+            gofmt -d $unformatted
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      # The suite includes TestShippedPackagesImportNoTLSLibrary, which is the
+      # guard on this transport's central design property: no shipped package
+      # may import a TLS stack. It is a test rather than a lint because it has
+      # to walk the import graph, but it is really a build gate.
+      - name: Test
+        run: go test -count=1 ./...
+
+      - name: Test with race detector
+        run: go test -count=1 -race ./...
+
+  # Replays what we actually emit at the real cover hosts and requires a
+  # ServerHello back.
+  #
+  # This is the only test that can fail for a reason no local test can see, and
+  # the failure mode is not theoretical: an earlier version of freshKeyShare
+  # filled key shares with random bytes, real servers answered decode_error,
+  # and every offline test passed throughout. A censor replaying one of our
+  # hellos to the SNI we claim is running exactly this check.
+  #
+  # It needs the network, so the tests are gated on TWIDDLE_LIVE_PROBE and skip
+  # by default. They also skip rather than fail when a host is unreachable after
+  # three attempts, so a network fault does not read as a rejection -- a real
+  # rejection reproduces on every attempt and still fails.
+  live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: "go.mod"
+
+      # On a push or pull request this replays a handful of shapes -- enough to
+      # catch a hello real servers reject, which is the failure that matters.
+      # The scheduled run sets TWIDDLE_LIVE_FULL_SWEEP and covers every distinct
+      # shape. The split is not thrift: the exhaustive sweep is ~120 connections
+      # to three real hosts, and running it repeatedly gets throttled, which
+      # then reads as a code regression.
+      - name: Replay emitted hellos at the real covers
+        env:
+          TWIDDLE_LIVE_PROBE: "1"
+          TWIDDLE_LIVE_FULL_SWEEP: ${{ github.event_name == 'schedule' && '1' || '' }}
+        run: |
+          go test -count=1 -v -timeout 25m             -run 'Live|RealCover|AcceptedByTheReal|SampleFull|Probe|AtLeastOneCover' ./...

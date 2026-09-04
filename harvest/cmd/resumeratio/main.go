@@ -26,11 +26,11 @@ import (
 )
 
 type stats struct {
-	mu       sync.Mutex
-	full     int
-	resumed  int
-	notTLS   int
-	perHost  map[string][2]int // host -> [full, resumed]
+	mu      sync.Mutex
+	full    int
+	resumed int
+	notTLS  int
+	perHost map[string][2]int // host -> [full, resumed]
 }
 
 func (s *stats) record(host string, isTLS, psk bool) {
