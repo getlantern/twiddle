@@ -1,7 +1,8 @@
 # The full-handshake carrier
 
-**Status:** designed, not built. Everything below the "What already exists" line is groundwork that
-landed in #1; the carrier itself is unstarted.
+**Status:** built and green in twiddle; not yet provisioned or enabled downstream. The carrier, both
+handshake paths, credential rotation and the pool filter all landed on `fisk/full-handshake-carrier`.
+What is left is the mix policy and the cross-repo provisioning — see "What remains".
 
 ## The problem, measured
 
@@ -49,7 +50,7 @@ So amend, do not overturn:
 
 That reframing sets the bar, and it is much lower than 4%: we do not need to match the wild distribution.
 We need first contact to be a full handshake, and resumption afterwards to be what it is everywhere else —
-the continuation of an observed relationship. See "Mix policy" below; that is why it needs no dice roll.
+the continuation of an observed relationship. See "What remains"; that is why it needs no dice roll.
 
 **The sharper form of the problem.** You cannot resume a session that was never established. An
 observer with flow history sees a `pre_shared_key` hello to an IP it never saw that client complete a
@@ -61,9 +62,9 @@ CDNs share tickets across IPs, so a censor with finite history gets false positi
 signal, not a proof — and note it is exactly the signal the first-contact-full policy erases, which is
 the argument for building this at all.
 
-## What already exists
+## Groundwork from #1
 
-Landed in #1, all of it prerequisite:
+Prerequisite, and all of it already on main before this work:
 
 - `ServerHelloFullLen = 1215` beside `ServerHelloResumedLen = 1221` (`serverhello.go`). The 6-byte
   delta is `pre_shared_key`.
@@ -221,38 +222,61 @@ Costs, and why it is second choice:
   psk), but a later compromise of the static key retroactively reveals the `clientID` in past openings.
   The ECH carrier has no equivalent exposure.
 
-## Open questions
+## What was built
 
-1. **Re-full cadence.** See "Mix policy" reasoning above: the censor's flow history is finite and the
-   client's context changes, so some trigger — new local address, new egress IP, elapsed time — has to
-   force a fresh full handshake rather than resuming forever off one observed predecessor.
-2. **Where credential rotation lives.** It currently rides a NewSessionTicket-shaped record, but cloudflare
-   and google send **no** unprompted post-handshake records at all, so on those covers that record has no
-   counterpart. Unchanged by this work, but it lands in the same code.
-3. **Full-path ticket length.** 144 bytes is proposed so every ECH bucket stays reachable. Confirm
-   `MinTicketLen` (76) leaves enough padding entropy, and decide whether the server should accept only 144
-   or any length that decrypts.
+All of it mutation-tested — every guarantee below has a deliberate break that fails a test.
 
-## Implementation sketch
+| Piece | Where |
+|---|---|
+| `SetECHTicketAuth` / `VerifyECHTicketAuth`, `FullTicketLen = 144`, `echPayload`, `ECHPayloadLen` | `echcarrier.go` |
+| `Credential.FullTicket`, `IssueFullFor`, both tickets sealed at one instant | `auth.go` |
+| `CredentialFromWireFull` (additive; `CredentialFromWire` stays resumption-only) | `pool.go` |
+| `ServerHelloParams.FullHandshake` — omits `pre_shared_key`, the exact 6-byte delta | `serverhello.go` |
+| `validateClientHello` split; `validateFullClientHello`; `DrawFullRemainder`; `Adopt` carries jitter | `cover.go` |
+| `Options.FullHandshake`, `pre_shared_key` stripped from the template | `twiddle.go` |
+| `ClientConfig.FullHandshake`, server dispatch on PSK presence, jittered emission, two-record rotation | `handshake.go` |
+| `FullHandshakeCarriers` — the pool is not uniform, so the draw must be restricted | `echcarrier.go` |
+| `ProbeResult.RemainderJitter`, filled by `SampleFull` | `cover.go`, `harvest/coverprobe` |
 
-1. `SetECHTicketAuth` / `VerifyECHTicketAuth` in `auth.go`, mirroring `SetTicketAuth` / `VerifyTicketAuth`:
-   write the ticket into the ECH payload padded to the drawn bucket, then HMAC the marshalled hello with
-   `random` zeroed and write the result into `random`.
-   **Ordering matters,** the same rule the binder follows: the MAC covers the final byte layout, so it is
-   computed last. The pipeline becomes `SetSNI → Rerandomize → Shuffle → SetKeyShare → SetECHTicketAuth`.
-   Note `Rerandomize` overwrites `h.Random` (`twiddle.go:82`) *and* redraws the ECH payload
-   (`rerandECHGrease`), so both writes must follow it.
-2. Branch `validateClientHello` (`cover.go:155`) and `Server` (`handshake.go`) on whether `pre_shared_key`
-   is present, instead of requiring it. The full path reads the ticket from ECH and verifies the `random`
-   MAC; everything downstream — `TicketKey.Open`, `ReplayCache.Consume`, `DeriveSession` — is unchanged.
-3. Extend `CanEmitFullHandshake()` to also require an ECH extension whose payload can hold the ticket. A
-   pool without ECH falls back to resumption; say why in the comment (see "The objection" above).
-4. Server emission: `ServerHelloFullLen`, then CCS, then one record per `FullRemainder` entry, jittered
-   within `FullRemainderJitter`. Client: one read per entry.
-5. Extend `cover_test.go`'s oracle. It cannot pin `FullRemainder` to a literal (probed, and it jitters);
-   pin the *structure* — ServerHello length, record count, plausible range.
-6. Mix policy: first contact to an egress is full, later connections resume, plus the re-full trigger from
-   open question 1.
+Measured end to end against the microsoft profile: **ServerHello 1215, ccs 6, remainder
+`[32 8273 286 74]`** — the shape from `postflight-full-vs-resumed.log`, with the record *count* right,
+which is what an observer counts.
+
+Three decisions worth knowing, because each looks like an omission until you see why:
+
+- **The server does not check that the ECH payload length is one of Chrome's buckets.** That is a property
+  of what we *emit*, asserted on the emission side. A server refusing anything else would break the first
+  device-tapped pool from a Chrome whose buckets differ from the ones we measured, and strictness there
+  buys nothing against a censor, who sees the client's hello and not our validation of it.
+- **`Twiddle` strips `pre_shared_key` rather than requiring a clean template.** Harvested hellos routinely
+  carry one — they come from real browsing, which resumes, and the hellos in `harvest/testdata` do. The
+  emitted hello is then shorter than its source by exactly that extension, which is precisely the
+  difference between a real Chrome resumption hello and a real Chrome full one.
+- **Both tickets of a credential are sealed at the same instant.** `ReplayCache` refuses a ticket older
+  than the client's newest, so a one-second skew between them would make whichever path the client used
+  *second* look like a stale capture. That failure is invisible to a test of either path alone.
+
+## What remains
+
+1. **Mix policy — the last twiddle-side question.** `ClientConfig.FullHandshake` is per-connection, so the
+   mechanism is in place and the policy is the caller's. What still needs deciding is the **re-full
+   cadence**: the censor's flow history is finite and the client's context changes, so a reconnection a
+   week later, from a different network, after the egress IP rotated, has no observable predecessor even
+   though the ticket is valid. Some trigger — new local address, new egress IP, elapsed time — has to force
+   a fresh full handshake. Note the resulting ratio will sit *far above* 4% (a long-lived muxed tunnel
+   opens few outer connections, so one full per handful of resumed), and that is the correct outcome: what
+   a censor can check is whether the predecessor exists, not whether we hit a population average.
+2. **Provisioning the companion ticket.** lantern-cloud's `GenerateTwiddle` (PR #3291, draft) must emit
+   `full_ticket` alongside `ticket` and `psk`, and lantern-box must pass it to `CredentialFromWireFull`.
+   Until then a provisioned client is resumption-only, which degrades to today's behaviour rather than
+   failing. `cmd/twiddlecred` already prints it.
+3. **A probed full profile per egress.** `CanEmitFullHandshake()` gates both ends on `FullRemainder`, which
+   the table ships empty on purpose, so nothing offers the path until `coverprobe.SampleFull` has run
+   against the live upstream and `Adopt` has taken the result. The startup-probe plumbing is the same work
+   the resumed profile needs.
+4. **`sessionTicketWire = 370` is still wrong for all three covers** (microsoft was measured at 303,
+   cloudflare and google issue none unprompted). Pre-existing; rotation now sends two records, which is
+   closer to microsoft's measured pair, but the size itself is untouched.
 
 ## Traps worth knowing before starting
 
