@@ -408,6 +408,21 @@ func readTickets(c *Conn) (*Credential, error) {
 	// hands the conn to its caller, so no application can write ahead of it --
 	// and these checks are the tripwire if that ever stops being true.
 	//
+	// Asked and declined during review: should a non-handshake second record be
+	// treated as "no companion ticket" so a one-record server still works, for
+	// a rolling upgrade? No. This transport supports NO mixed-version
+	// deployment, deliberately. Both ends must already agree exactly on
+	// TicketLen, BinderLen, CipherSuite, PSKFirst and the ResumedRemainder
+	// SEQUENCE -- the client reads one record per entry, so a mismatch there
+	// misaligns every later read -- and all of it arrives together in one
+	// provisioned CoverProfile. A compatibility path here would cover one field
+	// of many and imply a guarantee the rest of the protocol does not offer.
+	//
+	// If mixed-version deployment is ever needed, the answer is an explicit
+	// version in the provisioned config, which already reaches both ends,
+	// deciding the record count up front. Not a record-type inference at
+	// runtime, which would re-open exactly what the type check above closes.
+	//
 	// The length check is EXACT because a loose one turned out to carry no
 	// weight. writeTickets emits precisely u16 ‖ ticket ‖ psk, and the padding
 	// writeSized adds is stripped back off by decryptRecord, so a legitimate
