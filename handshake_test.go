@@ -234,6 +234,34 @@ func TestSynthesizedServerHelloMatchesMeasuredLength(t *testing.T) {
 	h, _ := ParseClientHello(wire)
 	eph, _ := h.KeyShare()
 
+	// The full variant omits pre_shared_key, and that omission is the ENTIRE
+	// difference between the two measured lengths -- 6 bytes: type, length and
+	// selected_identity. Both are point targets from
+	// harvest/testdata/postflight-full-vs-resumed.log, not ranges.
+	if ServerHelloResumedLen-ServerHelloFullLen != 6 {
+		t.Errorf("the measured lengths differ by %d, not the 6 bytes pre_shared_key occupies",
+			ServerHelloResumedLen-ServerHelloFullLen)
+	}
+	for _, full := range []bool{false, true} {
+		for _, pskFirst := range []bool{false, true} {
+			sh, err := SynthesizeServerHello(ServerHelloParams{
+				SessionIDEcho: h.SessionID, ServerEphemeral: eph,
+				PSKFirst: pskFirst, FullHandshake: full,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := ServerHelloResumedLen
+			if full {
+				want = ServerHelloFullLen
+			}
+			if len(sh) != want {
+				t.Errorf("full=%v PSKFirst=%v: ServerHello is %d bytes, measured %d",
+					full, pskFirst, len(sh), want)
+			}
+		}
+	}
+
 	for _, pskFirst := range []bool{false, true} {
 		sh, err := SynthesizeServerHello(ServerHelloParams{
 			SessionIDEcho: h.SessionID, ServerEphemeral: eph, PSKFirst: pskFirst,
@@ -407,4 +435,273 @@ func TestReadTicketsRejectsNonHandshakeRecords(t *testing.T) {
 	if _, err := readTickets(r); err == nil {
 		t.Error("readTickets accepted an application_data record as a rotated credential")
 	}
+}
+
+// fullCover returns a microsoft profile with a full-handshake shape adopted.
+// The table ships none on purpose -- the certificate flight cannot be a
+// constant -- so a test that needs one must supply it the way an egress does,
+// through Adopt, which also exercises the adoption path.
+func fullCover(t *testing.T) CoverProfile {
+	t.Helper()
+	base := mustCover(t, "www.microsoft.com")
+	// harvest/testdata/postflight-full-vs-resumed.log
+	remainder := []int{32, 8273, 286, 74}
+	burst := ServerHelloFullLen + len(ChangeCipherSpec())
+	for _, n := range remainder {
+		burst += n
+	}
+	p, err := base.Adopt(ProbeResult{
+		Host: base.Host, Full: true,
+		ServerHello:     ServerHelloFullLen,
+		Remainder:       remainder,
+		RemainderJitter: []int{0, 1, 0, 0},
+		OpeningBurst:    burst,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.CanEmitFullHandshake() {
+		t.Fatal("adopted profile still cannot emit a full handshake")
+	}
+	return p
+}
+
+// The full-handshake path end to end: no pre_shared_key anywhere, a 1215-byte
+// ServerHello, a certificate-sized remainder, and bytes through the tunnel.
+func TestEndToEndFullHandshake(t *testing.T) {
+	k := ticketKey(t)
+	cover := fullCover(t)
+	cred, err := k.Issue(77, cover.TicketLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	type result struct {
+		conn *Conn
+		err  error
+	}
+	srvCh := make(chan result, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			srvCh <- result{nil, err}
+			return
+		}
+		sc, err := Server(c, ServerConfig{
+			TicketKey: k, Cover: cover,
+			MaxAge: time.Hour, Replay: NewReplayCache(16, time.Hour),
+		})
+		srvCh <- result{sc, err}
+	}()
+
+	raw, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cc, next, err := Client(raw, ClientConfig{
+		Pool: pool(t), Cover: cover, Credential: cred, FullHandshake: true,
+	})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	r := <-srvCh
+	if r.err != nil {
+		t.Fatalf("server: %v", r.err)
+	}
+	if next == nil || len(next.FullTicket) != FullTicketLen {
+		t.Fatal("the full-handshake flight did not rotate both tickets")
+	}
+
+	payload := make([]byte, 40000)
+	rand.Read(payload)
+	go func() {
+		r.conn.Write(payload)
+		r.conn.Close()
+	}()
+	got, err := io.ReadAll(cc)
+	if err != nil && err != io.EOF {
+		t.Fatalf("read: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("payload mismatch: got %d bytes, want %d", len(got), len(payload))
+	}
+	t.Logf("opened a full handshake and carried %d bytes", len(got))
+}
+
+// What the censor counts. The server's answer to a full handshake must be a
+// 1215-byte ServerHello, a ChangeCipherSpec, and one record per FullRemainder
+// entry -- microsoft's four, not a single coalesced blob. A fixed record count
+// here was the bug the resumed path already hit from the other side.
+func TestServerAnswersAFullHandshakeWithTheMeasuredShape(t *testing.T) {
+	k := ticketKey(t)
+	cover := fullCover(t)
+	cred, err := k.Issue(78, cover.TicketLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		c.SetDeadline(time.Now().Add(5 * time.Second))
+		Server(c, ServerConfig{
+			TicketKey: k, Cover: cover,
+			MaxAge: time.Hour, Replay: NewReplayCache(16, time.Hour),
+		})
+	}()
+
+	raw, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	raw.SetDeadline(time.Now().Add(5 * time.Second))
+
+	wire, _, err := Twiddle(pool(t)[0], Options{
+		CoverSNI: cover.Host, Credential: cred, FullHandshake: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The opening itself must read as a full handshake.
+	h, err := ParseClientHello(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.Find(ExtPreSharedKey) != nil {
+		t.Fatal("the emitted opening carries pre_shared_key; it still reads as a resumption")
+	}
+	if _, err := raw.Write(wire); err != nil {
+		t.Fatal(err)
+	}
+
+	sh, err := readRecord(raw)
+	if err != nil {
+		t.Fatalf("ServerHello: %v", err)
+	}
+	if len(sh) != ServerHelloFullLen {
+		t.Errorf("ServerHello is %d bytes, want the full-handshake %d", len(sh), ServerHelloFullLen)
+	}
+	if _, err := readRecord(raw); err != nil { // ChangeCipherSpec
+		t.Fatalf("ChangeCipherSpec: %v", err)
+	}
+
+	var got []int
+	for range cover.FullRemainder {
+		rec, err := readRecord(raw)
+		if err != nil {
+			t.Fatalf("remainder record %d of %d: %v", len(got)+1, len(cover.FullRemainder), err)
+		}
+		got = append(got, len(rec))
+	}
+	if len(got) != len(cover.FullRemainder) {
+		t.Fatalf("read %d remainder records, want %d", len(got), len(cover.FullRemainder))
+	}
+	for i, n := range got {
+		lo := cover.FullRemainder[i]
+		hi := lo + cover.FullRemainderJitter[i]
+		if n < lo || n > hi {
+			t.Errorf("remainder record %d is %d bytes, outside the sampled [%d, %d]", i, n, lo, hi)
+		}
+	}
+	// A fifth record would mean the server coalesced or split differently than
+	// the identity it claims.
+	raw.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+	if extra, err := readRecord(raw); err == nil {
+		t.Errorf("server sent an unexpected %d-byte record after the remainder", len(extra))
+	}
+	t.Logf("full opening: SH %d, ccs %d, remainder %v", len(sh), len(ChangeCipherSpec()), got)
+}
+
+// The two ways a client can ask for a shape it cannot produce.
+func TestFullHandshakeRefusesWhatItCannotBack(t *testing.T) {
+	k := ticketKey(t)
+
+	t.Run("cover has no measured full profile", func(t *testing.T) {
+		cover := mustCover(t, "www.microsoft.com") // table default: no FullRemainder
+		cred, _ := k.Issue(79, cover.TicketLen)
+		_, _, err := Client(nil, ClientConfig{
+			Pool: pool(t), Cover: cover, Credential: cred, FullHandshake: true,
+		})
+		if err == nil {
+			t.Fatal("a full handshake was attempted against a cover with no measured profile")
+		}
+		if !contains(err.Error(), "full-handshake profile") {
+			t.Errorf("unhelpful error: %v", err)
+		}
+	})
+
+	t.Run("server has no measured full profile", func(t *testing.T) {
+		// The client gate is not the only one that matters: a server whose cover
+		// was never probed must refuse rather than answer with a guessed
+		// certificate flight, which would be a distinguisher of its own.
+		emit := fullCover(t)
+		serve := mustCover(t, "www.microsoft.com") // table default
+		cred, _ := k.Issue(81, emit.TicketLen)
+
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ln.Close()
+		errCh := make(chan error, 1)
+		go func() {
+			c, err := ln.Accept()
+			if err != nil {
+				errCh <- err
+				return
+			}
+			defer c.Close()
+			c.SetDeadline(time.Now().Add(3 * time.Second))
+			_, err = Server(c, ServerConfig{
+				TicketKey: k, Cover: serve,
+				MaxAge: time.Hour, Replay: NewReplayCache(16, time.Hour),
+			})
+			errCh <- err
+		}()
+		raw, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer raw.Close()
+		wire, _, err := Twiddle(pool(t)[0], Options{
+			CoverSNI: emit.Host, Credential: cred, FullHandshake: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := raw.Write(wire); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-errCh; err != ErrNotOurs {
+			t.Fatalf("got %v, want ErrNotOurs -- the server answered a shape it has not measured", err)
+		}
+	})
+
+	t.Run("credential has no companion ticket", func(t *testing.T) {
+		cover := fullCover(t)
+		cred, _ := k.Issue(80, cover.TicketLen)
+		cred.FullTicket = nil // as CredentialFromWire would leave it
+		_, _, err := Twiddle(pool(t)[0], Options{
+			CoverSNI: cover.Host, Credential: cred, FullHandshake: true,
+		})
+		if err == nil {
+			t.Fatal("a full handshake was emitted from a resumption-only credential")
+		}
+		if !contains(err.Error(), "full ticket") {
+			t.Errorf("unhelpful error: %v", err)
+		}
+	})
 }

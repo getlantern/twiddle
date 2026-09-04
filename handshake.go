@@ -28,7 +28,17 @@ type ClientConfig struct {
 	// Credential is the ticket and psk to present. Replaced after each
 	// connection with the one the server issues as a post-handshake ticket.
 	Credential *Credential
-	Shaper     Shaper
+	// FullHandshake opens with a FULL-handshake shape instead of a resumption:
+	// no pre_shared_key, the ticket in the ECH payload, and a server flight
+	// carrying a certificate-sized remainder.
+	//
+	// It exists because emitting only resumption hellos is itself a
+	// distinguisher -- measured at 4.1% of real browsing -- and because a
+	// resumption to an address the client was never seen completing a full
+	// handshake with is structurally impossible in real TLS. First contact with
+	// an egress should use this; see docs/full-handshake-carrier.md.
+	FullHandshake bool
+	Shaper        Shaper
 }
 
 // ServerConfig is what an egress needs to accept one.
@@ -62,15 +72,30 @@ func Client(raw net.Conn, cfg ClientConfig) (*Conn, *Credential, error) {
 	if len(cfg.Credential.Ticket) != cfg.Cover.TicketLen {
 		return nil, nil, fmt.Errorf("twiddle: credential ticket length %d does not match cover %d", len(cfg.Credential.Ticket), cfg.Cover.TicketLen)
 	}
+	// Refused here rather than on the wire. A client that opened a full
+	// handshake against a cover with no measured full profile would get a
+	// guessed certificate flight back, which is worse than not offering the
+	// shape at all.
+	if cfg.FullHandshake && !cfg.Cover.CanEmitFullHandshake() {
+		return nil, nil, fmt.Errorf("twiddle: cover %s has no measured full-handshake profile", cfg.Cover.Host)
+	}
+	// The remainder record COUNT is what the client reads, so the two shapes
+	// are read differently and picking the wrong sequence misaligns every
+	// later read.
+	remainder := cfg.Cover.ResumedRemainder
+	if cfg.FullHandshake {
+		remainder = cfg.Cover.FullRemainder
+	}
 	pick, err := rand.Int(rand.Reader, bigLen(len(cfg.Pool)))
 	if err != nil {
 		return nil, nil, err
 	}
 
 	wire, eph, err := Twiddle(cfg.Pool[pick.Int64()], Options{
-		CoverSNI:   cfg.Cover.Host,
-		Credential: cfg.Credential,
-		BinderLen:  cfg.Cover.BinderLen,
+		CoverSNI:      cfg.Cover.Host,
+		Credential:    cfg.Credential,
+		BinderLen:     cfg.Cover.BinderLen,
+		FullHandshake: cfg.FullHandshake,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -109,7 +134,7 @@ func Client(raw net.Conn, cfg ClientConfig) (*Conn, *Credential, error) {
 	// remainder 32/74 where cloudflare and google coalesce it into one 64.
 	// Reading a fixed one record left microsoft's second record in the stream
 	// and every later read misaligned.
-	for range cfg.Cover.ResumedRemainder {
+	for range remainder {
 		if _, _, err := conn.consumeRecord(); err != nil {
 			return nil, nil, err
 		}
@@ -166,7 +191,17 @@ func Server(raw net.Conn, cfg ServerConfig) (*Conn, error) {
 	if err != nil {
 		return nil, ErrNotOurs
 	}
-	res, err := VerifyTicketAuth(h, cfg.TicketKey, maxAge)
+	// The same signal that selected the validator selects the authenticator,
+	// and the two must not disagree: a hello with pre_shared_key is a
+	// resumption and its ticket came out of that extension, a hello without one
+	// is a full handshake and its ticket came out of the ECH payload.
+	full := h.Find(ExtPreSharedKey) == nil
+	var res *AuthResult
+	if full {
+		res, err = VerifyECHTicketAuth(h, cfg.TicketKey, maxAge)
+	} else {
+		res, err = VerifyTicketAuth(h, cfg.TicketKey, maxAge)
+	}
 	if err != nil {
 		return nil, ErrNotOurs
 	}
@@ -183,6 +218,7 @@ func Server(raw net.Conn, cfg ServerConfig) (*Conn, error) {
 		CipherSuite:     cfg.Cover.CipherSuite,
 		ServerEphemeral: priv.PublicKey(),
 		PSKFirst:        cfg.Cover.PSKFirst,
+		FullHandshake:   full,
 	})
 	if err != nil {
 		return nil, err
@@ -208,8 +244,18 @@ func Server(raw net.Conn, cfg ServerConfig) (*Conn, error) {
 	}
 
 	// One write per record the cover actually sends: microsoft splits the
-	// remainder 32/74 where cloudflare and google coalesce it into one 64.
-	for _, n := range cfg.Cover.ResumedRemainder {
+	// resumed remainder 32/74 where cloudflare and google coalesce it into one
+	// 64. The full remainder is the certificate flight -- one to two orders of
+	// magnitude larger -- and is drawn fresh each connection, because a
+	// certificate flight that is byte-identical every time is a distinguisher
+	// no real server produces.
+	remainder := cfg.Cover.ResumedRemainder
+	if full {
+		if remainder, err = cfg.Cover.DrawFullRemainder(); err != nil {
+			return nil, err
+		}
+	}
+	for _, n := range remainder {
 		if err := conn.writeSized(contentHandshake, nil, n); err != nil {
 			return nil, err
 		}

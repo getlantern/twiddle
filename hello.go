@@ -223,3 +223,17 @@ func (h *ClientHello) SetSNI(name string) error {
 	e.Data = append(d, name...)
 	return nil
 }
+
+// dropExtension removes every instance of an extension type, and reports
+// whether anything was removed.
+func (h *ClientHello) dropExtension(t uint16) bool {
+	out := h.Extensions[:0]
+	for _, e := range h.Extensions {
+		if e.Type != t {
+			out = append(out, e)
+		}
+	}
+	removed := len(out) != len(h.Extensions)
+	h.Extensions = out
+	return removed
+}

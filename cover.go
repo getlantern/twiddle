@@ -1,8 +1,10 @@
 package twiddle
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
+	"math/big"
 	"slices"
 	"strings"
 	"time"
@@ -138,20 +140,65 @@ func (p CoverProfile) Valid() error {
 	return nil
 }
 
+// validateClientHello checks a hello against the cover identity and returns the
+// ticket the replay gate must spend.
+//
+// It dispatches on the presence of pre_shared_key, which is the same signal
+// that selects the authenticator: a hello carrying one is a resumption and its
+// ticket is in there, a hello without one is a full handshake and its ticket is
+// in the ECH payload. The two are never both valid, so there is no ambiguity to
+// resolve and no order to get wrong.
 func (p CoverProfile) validateClientHello(h *ClientHello) ([]byte, error) {
-	if !strings.EqualFold(h.SNI(), p.Host) {
-		return nil, fmt.Errorf("twiddle: ClientHello SNI %q does not match cover %q", h.SNI(), p.Host)
+	if err := p.validateCoverIdentity(h); err != nil {
+		return nil, err
 	}
-	offersCipher := false
+	if h.Find(ExtPreSharedKey) == nil {
+		return p.validateFullClientHello(h)
+	}
+	return p.validateResumedClientHello(h)
+}
+
+// validateCoverIdentity checks what both handshake shapes must satisfy.
+func (p CoverProfile) validateCoverIdentity(h *ClientHello) error {
+	if !strings.EqualFold(h.SNI(), p.Host) {
+		return fmt.Errorf("twiddle: ClientHello SNI %q does not match cover %q", h.SNI(), p.Host)
+	}
 	for _, suite := range h.CipherSuites {
 		if suite == p.CipherSuite {
-			offersCipher = true
-			break
+			return nil
 		}
 	}
-	if !offersCipher {
-		return nil, fmt.Errorf("twiddle: ClientHello does not offer cover cipher %#04x", p.CipherSuite)
+	return fmt.Errorf("twiddle: ClientHello does not offer cover cipher %#04x", p.CipherSuite)
+}
+
+// validateFullClientHello checks a full-handshake opening and returns the
+// ticket carried in the ECH payload.
+//
+// Deliberately NOT checked here: whether the payload length is one of Chrome's
+// buckets. That is a property of what we EMIT, asserted on the emission side,
+// and a server refusing anything else would break the first device-tapped pool
+// from a Chrome whose buckets differ from the ones we measured. Strictness here
+// buys nothing against a censor, who sees the client's hello and not our
+// validation of it.
+func (p CoverProfile) validateFullClientHello(h *ClientHello) ([]byte, error) {
+	if !p.CanEmitFullHandshake() {
+		return nil, fmt.Errorf("twiddle: cover %s has no measured full-handshake profile to answer with", p.Host)
 	}
+	e := h.Find(ExtECH)
+	if e == nil {
+		return nil, errors.New("twiddle: full-handshake ClientHello carries no ECH extension")
+	}
+	pay, err := echPayload(e)
+	if err != nil {
+		return nil, err
+	}
+	if len(pay) < FullTicketLen {
+		return nil, fmt.Errorf("twiddle: ECH payload is %d bytes, too small to carry a ticket", len(pay))
+	}
+	return pay[:FullTicketLen], nil
+}
+
+func (p CoverProfile) validateResumedClientHello(h *ClientHello) ([]byte, error) {
 	e := h.Find(ExtPreSharedKey)
 	if e == nil {
 		return nil, errors.New("twiddle: ClientHello carries no pre_shared_key")
@@ -181,6 +228,41 @@ func (p CoverProfile) FullOpeningBurst() int {
 		total += n
 	}
 	return total
+}
+
+// DrawFullRemainder returns one emission's full-handshake remainder sequence,
+// each record jittered within the range coverprobe sampled for it.
+//
+// Emitting FullRemainder verbatim would make this the only host on the network
+// whose certificate flight is byte-identical on every connection, which is a
+// distinguisher that costs a censor one comparison. The baseline is the
+// smallest length observed and the draw is uniform over
+// [baseline, baseline+jitter].
+//
+// A sampled jitter is a FLOOR, not the true range: five samples reported 1 for
+// cloudflare, which has since been seen at 3846, 3847 and 3848. Widening it
+// from more samples is safe; narrowing it is not.
+func (p CoverProfile) DrawFullRemainder() ([]int, error) {
+	if len(p.FullRemainder) == 0 {
+		return nil, fmt.Errorf("twiddle: cover %s has no measured full-handshake remainder", p.Host)
+	}
+	if len(p.FullRemainderJitter) != 0 && len(p.FullRemainderJitter) != len(p.FullRemainder) {
+		return nil, fmt.Errorf("twiddle: cover %s has %d remainder records but %d jitter ranges",
+			p.Host, len(p.FullRemainder), len(p.FullRemainderJitter))
+	}
+	out := make([]int, len(p.FullRemainder))
+	for i, base := range p.FullRemainder {
+		out[i] = base
+		if len(p.FullRemainderJitter) == 0 || p.FullRemainderJitter[i] <= 0 {
+			continue
+		}
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(p.FullRemainderJitter[i])+1))
+		if err != nil {
+			return nil, err
+		}
+		out[i] = base + int(n.Int64())
+	}
+	return out, nil
 }
 
 // CanEmitFullHandshake reports whether this profile has been given a measured
@@ -251,7 +333,11 @@ type ProbeResult struct {
 	Remainder []int
 	// OpeningBurst is ServerHello + ChangeCipherSpec + every remainder record.
 	OpeningBurst int
-	Elapsed      time.Duration
+	// RemainderJitter is the per-position range, in bytes, observed across
+	// samples. Same length as Remainder when set; only SampleFull fills it,
+	// because a single probe cannot see a range.
+	RemainderJitter []int
+	Elapsed         time.Duration
 }
 
 const (
@@ -315,8 +401,13 @@ func (p CoverProfile) Adopt(res ProbeResult) (CoverProfile, error) {
 			return p, fmt.Errorf("twiddle: full probe of %s returned a %d B opening burst, outside the plausible %d..%d for a certificate flight",
 				res.Host, res.OpeningBurst, minFullBurst, maxFullBurst)
 		}
+		if n := len(res.RemainderJitter); n != 0 && n != len(res.Remainder) {
+			return p, fmt.Errorf("twiddle: full probe of %s returned %d remainder records but %d jitter ranges",
+				res.Host, len(res.Remainder), n)
+		}
 		out := p
 		out.FullRemainder = append([]int(nil), res.Remainder...)
+		out.FullRemainderJitter = append([]int(nil), res.RemainderJitter...)
 		return out, nil
 	}
 

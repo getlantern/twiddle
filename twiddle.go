@@ -392,8 +392,13 @@ type Options struct {
 	// a server's ticket format does not vary connection to connection.
 	TicketLen int
 	// BinderLen must equal the hash length of the cipher suite the synthesised
-	// ServerHello selects: 32 for SHA-256, 48 for SHA-384.
+	// ServerHello selects: 32 for SHA-256, 48 for SHA-384. Ignored when
+	// FullHandshake is set, which has no binder.
 	BinderLen int
+	// FullHandshake emits a FULL-handshake opening: no pre_shared_key, the
+	// ticket in the ECH payload and the MAC in random. See echcarrier.go and
+	// docs/full-handshake-carrier.md.
+	FullHandshake bool
 }
 
 // Twiddle rewrites a harvested ClientHello for emission and returns the wire
@@ -409,6 +414,13 @@ type Options struct {
 // the transcript and silently invalidates the binder. Real TLS has the same
 // constraint: a client picks its extension order first and computes the binder
 // last.
+//
+// The full-handshake variant substitutes SetECHTicketAuth for the final step
+// and is bound by the same rule for the same reason. It is bound MORE tightly,
+// in fact: its MAC covers the whole hello rather than a truncation of it, and
+// Rerandomize overwrites both fields it uses -- random directly, and the ECH
+// payload through rerandECHGrease -- so it must follow Rerandomize and not
+// merely SetKeyShare.
 func Twiddle(harvested []byte, opt Options) (wire []byte, eph *ecdh.PrivateKey, err error) {
 	h, err := ParseClientHello(harvested)
 	if err != nil {
@@ -428,6 +440,28 @@ func Twiddle(harvested []byte, opt Options) (wire []byte, eph *ecdh.PrivateKey, 
 	eph, err = h.SetKeyShare()
 	if err != nil {
 		return nil, nil, err
+	}
+	if opt.FullHandshake {
+		// Harvested hellos routinely carry pre_shared_key -- they are captured
+		// from real browsing, which resumes -- so the template must be stripped
+		// rather than trusted. LoadPool's Sanitize already drops them, but a
+		// caller reading a raw capture does not go through it, and the resumed
+		// path is equally forgiving: setPSK removes any existing extension
+		// before appending its own.
+		//
+		// The emitted hello is then shorter than the hello it came from by
+		// exactly the pre_shared_key extension, which is precisely the
+		// difference between a real Chrome resumption hello and a real Chrome
+		// full one.
+		h.dropExtension(ExtPreSharedKey)
+		if len(opt.Credential.FullTicket) != FullTicketLen {
+			return nil, nil, fmt.Errorf("twiddle: credential carries a %d-byte full ticket, want %d; it cannot open a full handshake",
+				len(opt.Credential.FullTicket), FullTicketLen)
+		}
+		if err := h.SetECHTicketAuth(opt.Credential.FullTicket, opt.Credential.PSK[:]); err != nil {
+			return nil, nil, err
+		}
+		return h.Marshal(), eph, nil
 	}
 	if err := h.SetTicketAuth(opt.Credential, opt.BinderLen); err != nil {
 		return nil, nil, err

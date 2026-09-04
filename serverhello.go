@@ -58,6 +58,11 @@ type ServerHelloParams struct {
 	// PSKFirst places pre_shared_key before the other extensions, as google and
 	// cloudflare do. Should be stable for a given cover identity.
 	PSKFirst bool
+	// FullHandshake omits pre_shared_key entirely, which is what a server
+	// answering a full handshake does. That extension is exactly 6 bytes here
+	// -- type, length, selected_identity -- which is the whole difference
+	// between the two measured ServerHello lengths.
+	FullHandshake bool
 }
 
 // ServerHelloResumedLen is what every measured server produced for a resumed
@@ -93,9 +98,11 @@ func SynthesizeServerHello(p ServerHelloParams) ([]byte, error) {
 	copy(share[mlkem768CiphertextLen:], p.ServerEphemeral.Bytes())
 
 	var psk []byte
-	psk = appendU16(psk, ExtPreSharedKey)
-	psk = appendU16(psk, 2)
-	psk = appendU16(psk, p.SelectedIdentity)
+	if !p.FullHandshake {
+		psk = appendU16(psk, ExtPreSharedKey)
+		psk = appendU16(psk, 2)
+		psk = appendU16(psk, p.SelectedIdentity)
+	}
 
 	var rest []byte
 	rest = appendU16(rest, 0x002b) // supported_versions

@@ -313,6 +313,10 @@ func SampleFull(ctx context.Context, dial Dialer, host string, n int) (tw.ProbeR
 		jitter[i] = hi[i] - lo[i]
 	}
 	base.Remainder = lo
+	// Carried inside the result as well as returned, so CoverProfile.Adopt gets
+	// the baseline and its range together. Adopting a baseline without the
+	// range is what produces an emitter whose certificate flight never varies.
+	base.RemainderJitter = jitter
 	base.OpeningBurst = tw.ServerHelloFullLen + len(tw.ChangeCipherSpec())
 	for _, v := range lo {
 		base.OpeningBurst += v
