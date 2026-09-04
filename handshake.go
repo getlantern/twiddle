@@ -28,17 +28,34 @@ type ClientConfig struct {
 	// Credential is the ticket and psk to present. Replaced after each
 	// connection with the one the server issues as a post-handshake ticket.
 	Credential *Credential
-	// FullHandshake opens with a FULL-handshake shape instead of a resumption:
-	// no pre_shared_key, the ticket in the ECH payload, and a server flight
-	// carrying a certificate-sized remainder.
+	// FullHandshake FORCES a full-handshake opening: no pre_shared_key, the
+	// ticket in the ECH payload, and a server flight carrying a
+	// certificate-sized remainder.
 	//
 	// It exists because emitting only resumption hellos is itself a
 	// distinguisher -- measured at 4.1% of real browsing -- and because a
 	// resumption to an address the client was never seen completing a full
-	// handshake with is structurally impossible in real TLS. First contact with
-	// an egress should use this; see docs/full-handshake-carrier.md.
+	// handshake with is structurally impossible in real TLS. See
+	// docs/full-handshake-carrier.md.
+	//
+	// Prefer Contacts, which decides per connection. Setting this is a hard
+	// request: a cover with no measured full profile fails rather than
+	// degrading, because a caller who asked for the shape explicitly wants to
+	// know it is unavailable.
 	FullHandshake bool
-	Shaper        Shaper
+	// Contacts, when set, chooses the shape per connection: full on first
+	// contact with an egress, resumed afterwards, full again once the censor
+	// can no longer be assumed to remember. See ContactMemory.
+	//
+	// It lives here rather than in the caller so the decision cannot be
+	// forgotten, and so recording a completed handshake cannot be missed --
+	// both of which fail toward emitting resumptions, the direction that hurts.
+	//
+	// Nil means today's behaviour: resumption unless FullHandshake is set. That
+	// is the only workable default, since the cover table ships no full profile
+	// until one has been probed.
+	Contacts *ContactMemory
+	Shaper   Shaper
 }
 
 // ServerConfig is what an egress needs to accept one.
@@ -79,11 +96,24 @@ func Client(raw net.Conn, cfg ClientConfig) (*Conn, *Credential, error) {
 	if cfg.FullHandshake && !cfg.Cover.CanEmitFullHandshake() {
 		return nil, nil, fmt.Errorf("twiddle: cover %s has no measured full-handshake profile", cfg.Cover.Host)
 	}
+
+	// An explicit request is honoured; otherwise the contact memory decides.
+	// A Contacts-driven choice DEGRADES to resumption when the cover or the
+	// pool cannot back a full handshake, where an explicit one fails: the
+	// caller asked for the right shape, not for the connection to be refused,
+	// and refusing would make enabling Contacts depend on every cover having
+	// been probed first. The degradation is not recorded, so it keeps trying
+	// rather than latching.
+	full := cfg.FullHandshake
+	if !full && cfg.Contacts.needsFull(raw.LocalAddr(), raw.RemoteAddr(), time.Now()) {
+		full = cfg.Cover.CanEmitFullHandshake() && len(FullHandshakeCarriers(cfg.Pool)) > 0
+	}
+
 	// The remainder record COUNT is what the client reads, so the two shapes
 	// are read differently and picking the wrong sequence misaligns every
 	// later read.
 	remainder := cfg.Cover.ResumedRemainder
-	if cfg.FullHandshake {
+	if full {
 		remainder = cfg.Cover.FullRemainder
 	}
 	// The full path can only use hellos whose ECH payload holds a ticket, and a
@@ -91,7 +121,7 @@ func Client(raw net.Conn, cfg ClientConfig) (*Conn, *Credential, error) {
 	// Drawing from the whole pool would fail on some connections and succeed on
 	// others, depending on the draw.
 	candidates := cfg.Pool
-	if cfg.FullHandshake {
+	if full {
 		if candidates = FullHandshakeCarriers(cfg.Pool); len(candidates) == 0 {
 			return nil, nil, errors.New("twiddle: no hello in the pool has an ECH payload large enough to carry a full-handshake ticket")
 		}
@@ -105,7 +135,7 @@ func Client(raw net.Conn, cfg ClientConfig) (*Conn, *Credential, error) {
 		CoverSNI:      cfg.Cover.Host,
 		Credential:    cfg.Credential,
 		BinderLen:     cfg.Cover.BinderLen,
-		FullHandshake: cfg.FullHandshake,
+		FullHandshake: full,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -138,6 +168,7 @@ func Client(raw net.Conn, cfg ClientConfig) (*Conn, *Credential, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	conn.fullHandshake = full
 
 	// Server EncryptedExtensions+Finished stand-in. One read per record the
 	// cover sends, because the count varies by identity: microsoft splits the
@@ -162,6 +193,12 @@ func Client(raw net.Conn, cfg ClientConfig) (*Conn, *Credential, error) {
 	next, err := readTickets(conn)
 	if err != nil {
 		return nil, nil, err
+	}
+	// Recorded only now, with the opening complete. A full handshake that
+	// failed established no relationship for a later resumption to continue, so
+	// recording it would be the one direction that hurts.
+	if full {
+		cfg.Contacts.record(raw.LocalAddr(), raw.RemoteAddr(), time.Now())
 	}
 	return conn, next, nil
 }
@@ -252,6 +289,7 @@ func Server(raw net.Conn, cfg ServerConfig) (*Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	conn.fullHandshake = full
 
 	// One write per record the cover actually sends: microsoft splits the
 	// resumed remainder 32/74 where cloudflare and google coalesce it into one

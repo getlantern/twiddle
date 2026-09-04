@@ -777,3 +777,217 @@ func TestFullHandshakeWithNoCarrierInThePoolFailsClearly(t *testing.T) {
 		t.Errorf("unhelpful error: %v", err)
 	}
 }
+
+// dialOnce runs one full client/server exchange and reports the shape each end
+// believes it used. Both are returned because a disagreement is the failure
+// worth catching: the two ends would then be reading different record counts.
+func dialOnce(t *testing.T, k *TicketKey, cover CoverProfile, cfg ClientConfig, replay *ReplayCache) (clientFull, serverFull bool, err error) {
+	t.Helper()
+	ln, lerr := net.Listen("tcp", "127.0.0.1:0")
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	defer ln.Close()
+
+	type sres struct {
+		full bool
+		err  error
+	}
+	srvCh := make(chan sres, 1)
+	go func() {
+		c, aerr := ln.Accept()
+		if aerr != nil {
+			srvCh <- sres{false, aerr}
+			return
+		}
+		c.SetDeadline(time.Now().Add(5 * time.Second))
+		sc, serr := Server(c, ServerConfig{
+			TicketKey: k, Cover: cover, MaxAge: time.Hour, Replay: replay,
+		})
+		if serr != nil {
+			srvCh <- sres{false, serr}
+			return
+		}
+		srvCh <- sres{sc.FullHandshake(), nil}
+	}()
+
+	raw, derr := net.Dial("tcp", ln.Addr().String())
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	defer raw.Close()
+	raw.SetDeadline(time.Now().Add(5 * time.Second))
+	cc, _, cerr := Client(raw, cfg)
+	r := <-srvCh
+	if cerr != nil {
+		return false, false, cerr
+	}
+	if r.err != nil {
+		return false, false, r.err
+	}
+	return cc.FullHandshake(), r.full, nil
+}
+
+// The mix policy end to end: the first connection to an egress is a full
+// handshake, and the next one resumes. That is the whole point -- a resumption
+// with no observable predecessor is the distinguisher, and one full handshake
+// per egress removes it.
+func TestContactsMakeFirstContactFullAndTheNextResumed(t *testing.T) {
+	k := ticketKey(t)
+	cover := fullCover(t)
+	replay := NewReplayCache(64, time.Hour)
+	mem := NewContactMemory(time.Hour, 0)
+
+	cred, err := k.Issue(300, cover.TicketLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := ClientConfig{Pool: pool(t), Cover: cover, Credential: cred, Contacts: mem}
+
+	cf, sf, err := dialOnce(t, k, cover, cfg, replay)
+	if err != nil {
+		t.Fatalf("first connection: %v", err)
+	}
+	if !cf || !sf {
+		t.Fatalf("first contact was client-full=%v server-full=%v, want both true", cf, sf)
+	}
+	if mem.Tracked() != 1 {
+		t.Fatalf("the completed full handshake was not recorded (%d contacts)", mem.Tracked())
+	}
+
+	// A fresh credential, as rotation would supply, so the second connection
+	// fails for shape reasons rather than a spent ticket.
+	cfg.Credential, err = k.Issue(300, cover.TicketLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cf, sf, err = dialOnce(t, k, cover, cfg, replay)
+	if err != nil {
+		t.Fatalf("second connection: %v", err)
+	}
+	if cf || sf {
+		t.Errorf("the second connection was client-full=%v server-full=%v, want both false", cf, sf)
+	}
+
+	// And past the horizon it re-fulls, because the censor can no longer be
+	// assumed to remember.
+	mem.Reset()
+	cfg.Credential, err = k.Issue(300, cover.TicketLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cf, _, err = dialOnce(t, k, cover, cfg, replay)
+	if err != nil {
+		t.Fatalf("third connection: %v", err)
+	}
+	if !cf {
+		t.Error("after the relationship was forgotten the client did not re-full")
+	}
+}
+
+// A Contacts-driven choice degrades rather than failing when the cover has no
+// measured full profile, because refusing the connection would make enabling
+// Contacts depend on every cover having been probed first. The degradation must
+// not be recorded, or it would latch: one silent resumption would look like a
+// satisfied relationship forever.
+func TestContactsDegradeWhenTheCoverCannotBackAFullHandshake(t *testing.T) {
+	k := ticketKey(t)
+	cover := mustCover(t, "www.microsoft.com") // table default: no full profile
+	mem := NewContactMemory(time.Hour, 0)
+	cred, err := k.Issue(310, cover.TicketLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cf, sf, err := dialOnce(t, k, cover,
+		ClientConfig{Pool: pool(t), Cover: cover, Credential: cred, Contacts: mem},
+		NewReplayCache(64, time.Hour))
+	if err != nil {
+		t.Fatalf("the connection was refused instead of degrading: %v", err)
+	}
+	if cf || sf {
+		t.Errorf("client-full=%v server-full=%v against a cover with no full profile", cf, sf)
+	}
+	if mem.Tracked() != 0 {
+		t.Error("a degraded connection was recorded as a completed full handshake; it would never retry")
+	}
+}
+
+// The same degradation for a pool that cannot carry the ticket -- the non-ECH
+// pool docs/ech.md keeps as an escape hatch. Connectivity must survive it.
+func TestContactsDegradeWhenThePoolCannotCarryTheTicket(t *testing.T) {
+	k := ticketKey(t)
+	cover := fullCover(t)
+	mem := NewContactMemory(time.Hour, 0)
+	cred, err := k.Issue(320, cover.TicketLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	none := [][]byte{stripECH(t, DefaultPool()[0]), stripECH(t, DefaultPool()[1])}
+
+	cf, _, err := dialOnce(t, k, cover,
+		ClientConfig{Pool: none, Cover: cover, Credential: cred, Contacts: mem},
+		NewReplayCache(64, time.Hour))
+	if err != nil {
+		t.Fatalf("a pool with no carrier refused the connection instead of degrading: %v", err)
+	}
+	if cf {
+		t.Error("claimed a full handshake from a pool that cannot carry the ticket")
+	}
+	if mem.Tracked() != 0 {
+		t.Error("a degraded connection was recorded")
+	}
+}
+
+// A full handshake that FAILED established no relationship, so it must not be
+// recorded. Recording on attempt rather than completion is the subtle version
+// of the bug this whole mechanism exists to prevent: the next connection would
+// resume against an egress the censor never saw a completed handshake with,
+// which is exactly the structurally impossible shape.
+func TestContactsRecordOnlyCompletedHandshakes(t *testing.T) {
+	k := ticketKey(t)
+	cover := fullCover(t)
+	mem := NewContactMemory(time.Hour, 0)
+	cred, err := k.Issue(330, cover.TicketLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A server that reads the opening and then hangs up, so the client's full
+	// handshake reaches the wire but never completes.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, aerr := ln.Accept()
+		if aerr != nil {
+			return
+		}
+		c.SetDeadline(time.Now().Add(3 * time.Second))
+		readRecord(c) // consume the ClientHello, answer nothing
+		c.Close()
+	}()
+
+	raw, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	raw.SetDeadline(time.Now().Add(3 * time.Second))
+	local, remote := raw.LocalAddr(), raw.RemoteAddr()
+
+	if _, _, err := Client(raw, ClientConfig{
+		Pool: pool(t), Cover: cover, Credential: cred, Contacts: mem,
+	}); err == nil {
+		t.Fatal("the client reported success against a server that answered nothing")
+	}
+
+	if mem.Tracked() != 0 {
+		t.Errorf("a failed full handshake was recorded (%d contacts)", mem.Tracked())
+	}
+	if !mem.needsFull(local, remote, time.Now()) {
+		t.Error("after a FAILED full handshake the next connection would resume, with no completed predecessor for a censor to have seen")
+	}
+}
