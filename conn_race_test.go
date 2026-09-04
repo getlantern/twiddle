@@ -108,21 +108,36 @@ func TestCloseNotifyCannotOvertakeAFlush(t *testing.T) {
 		t.Fatal("the data record never reached the socket")
 	}
 
+	started := make(chan struct{})
 	closed := make(chan struct{})
 	go func() {
+		close(started)
 		_ = w.Close()
 		close(closed)
 	}()
+	<-started
 
-	// The data record is still parked in the socket write. close_notify must be
-	// waiting behind it, not already on the wire.
-	select {
-	case <-closed:
-		t.Fatal("close_notify was emitted while a flush held the wire")
-	case <-time.After(150 * time.Millisecond):
-	}
-	if n := gate.count(); n != 0 {
-		t.Fatalf("%d records reached the wire before the flush was released", n)
+	// The data record is still parked in the socket write, so close_notify must
+	// be waiting behind it rather than already on the wire.
+	//
+	// Proving that it did NOT happen needs a bound, and the bound has to outlast
+	// scheduling delay on a loaded machine: too short and a Close that never got
+	// to run reads as a Close that correctly waited, which passes for the wrong
+	// reason. started only proves the goroutine exists, so the loop also watches
+	// the wire itself -- without wireMu, Close's record is not blocked by the
+	// gate (only the first write is) and appears there directly, which is the
+	// symptom rather than a proxy for it.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if n := gate.count(); n != 0 {
+			t.Fatalf("%d records reached the wire while a flush held it", n)
+		}
+		select {
+		case <-closed:
+			t.Fatal("close_notify was emitted while a flush held the wire")
+		default:
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 
 	close(gate.release)
