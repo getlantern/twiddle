@@ -30,11 +30,10 @@ func fullCred(t *testing.T, k *TicketKey, clientID uint64) (*Credential, []byte)
 	if err != nil {
 		t.Fatal(err)
 	}
-	full, err := k.IssueFull(clientID, cred.PSK)
-	if err != nil {
-		t.Fatal(err)
+	if len(cred.FullTicket) != FullTicketLen {
+		t.Fatalf("Issue produced a %d-byte full ticket, want %d", len(cred.FullTicket), FullTicketLen)
 	}
-	return cred, full
+	return cred, cred.FullTicket
 }
 
 func TestECHCarrierRoundTrip(t *testing.T) {

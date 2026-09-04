@@ -235,14 +235,33 @@ func Server(raw net.Conn, cfg ServerConfig) (*Conn, error) {
 // both Finisheds, so it is outside the Wb=3 opening window the size bug was
 // about. Real later bursts also carry application data; matching that volume
 // is a later shaping concern.
+//
+// The size is a KNOWN-WRONG constant for all three covers -- microsoft was
+// measured issuing 303-byte tickets and cloudflare and google issue none
+// unprompted at all. Tracked in docs/full-handshake-carrier.md; not made worse
+// here.
 const sessionTicketWire = 370
 
+// Rotation is TWO records, one per ticket, rather than one carrying both.
+//
+// Not a stylistic choice: a single record would have to hold both tickets and
+// the psk, which for a microsoft cover is 2+256+2+144+32 = 436 bytes against
+// the 349 that fit inside sessionTicketWire, and writeSized would refuse it.
+// Two records is also the more faithful shape -- microsoft was measured
+// sending two unprompted NewSessionTickets after a full handshake -- and it
+// leaves the first record's layout byte-for-byte what it was.
 func writeTickets(c *Conn, next *Credential) error {
 	body := make([]byte, 0, 2+len(next.Ticket)+32)
 	body = appendU16(body, uint16(len(next.Ticket)))
 	body = append(body, next.Ticket...)
 	body = append(body, next.PSK[:]...)
-	return c.writeSized(contentHandshake, body, sessionTicketWire)
+	if err := c.writeSized(contentHandshake, body, sessionTicketWire); err != nil {
+		return err
+	}
+	full := make([]byte, 0, 2+len(next.FullTicket))
+	full = appendU16(full, uint16(len(next.FullTicket)))
+	full = append(full, next.FullTicket...)
+	return c.writeSized(contentHandshake, full, sessionTicketWire)
 }
 
 func readTickets(c *Conn) (*Credential, error) {
@@ -267,6 +286,22 @@ func readTickets(c *Conn) (*Credential, error) {
 	}
 	cred := &Credential{Ticket: append([]byte(nil), body[2:2+tl]...)}
 	copy(cred.PSK[:], body[2+tl:2+tl+32])
+
+	typ, body, err = c.consumeRecord()
+	if err != nil {
+		return nil, err
+	}
+	if typ != contentHandshake {
+		return nil, errMalformed
+	}
+	if len(body) < 2 {
+		return nil, errMalformed
+	}
+	fl := int(binary.BigEndian.Uint16(body[0:2]))
+	if fl != FullTicketLen || 2+fl > len(body) {
+		return nil, errMalformed
+	}
+	cred.FullTicket = append([]byte(nil), body[2:2+fl]...)
 	return cred, nil
 }
 

@@ -69,7 +69,15 @@ type TicketKey [32]byte
 // carries the next, exactly as NewSessionTicket does.
 type Credential struct {
 	Ticket []byte
-	PSK    [32]byte
+	// FullTicket is the same clientID and psk sealed at FullTicketLen, for the
+	// full-handshake carrier, which cannot use Ticket: the two paths size
+	// tickets for incompatible reasons. See IssueFullFor and echcarrier.go.
+	//
+	// Nil is legal and means resumption-only -- a credential provisioned before
+	// the carrier existed. Twiddle refuses the full path rather than emitting
+	// an opening no server can authenticate.
+	FullTicket []byte
+	PSK        [32]byte
 }
 
 func NewTicketKey() (*TicketKey, error) {
@@ -100,28 +108,40 @@ func (k *TicketKey) issueAt(clientID uint64, ticketLen int, now time.Time) (*Cre
 	if _, err := rand.Read(cred.PSK[:]); err != nil {
 		return nil, err
 	}
-	ticket, err := k.seal(clientID, cred.PSK, ticketLen, now)
-	if err != nil {
+	var err error
+	if cred.Ticket, err = k.seal(clientID, cred.PSK, ticketLen, now); err != nil {
 		return nil, err
 	}
-	cred.Ticket = ticket
+	// Sealed at the SAME instant, deliberately. ReplayCache refuses a ticket
+	// older than the client's newest, so two tickets of one credential bearing
+	// different issue times would make whichever path the client used second
+	// look like a stale capture and fail.
+	if cred.FullTicket, err = k.seal(clientID, cred.PSK, FullTicketLen, now); err != nil {
+		return nil, err
+	}
 	return cred, nil
 }
 
-// IssueFull mints the full-handshake companion to an existing credential: the
-// same clientID and psk, sealed at FullTicketLen so it fits inside the ECH
-// payload.
+// IssueFullFor mints the full-handshake companion for an EXISTING ticket,
+// which is how a credential provisioned before the carrier is upgraded.
 //
-// A client needs both tickets because the two paths size them for different
-// reasons. On the resumption path the length is a fidelity parameter -- the
-// ticket sets the emitted hello size, so it must match the identity being
-// impersonated. Inside the ECH payload it must instead fit Chrome's smallest
-// bucket. Those two constraints do not meet: a microsoft-sized 256-byte ticket
-// fits no ECH bucket at all. Sharing the psk is what keeps them one credential
-// rather than two identities, so rotation and the replay gate see a single
-// client either way.
-func (k *TicketKey) IssueFull(clientID uint64, psk [32]byte) ([]byte, error) {
-	return k.seal(clientID, psk, FullTicketLen, time.Now())
+// A client needs both tickets because the two paths size them for
+// incompatible reasons. On the resumption path the length is a fidelity
+// parameter -- the ticket sets the emitted hello size, so it must match the
+// identity being impersonated. Inside the ECH payload it must instead fit
+// Chrome's smallest bucket. Those constraints do not meet: a microsoft-sized
+// 256-byte ticket fits no ECH bucket at all.
+//
+// It takes the ticket rather than the fields so the clientID, psk AND issue
+// time can only come from the ticket being companioned. Passing those
+// separately would make it possible to seal a companion with a different
+// issue time, which ReplayCache would then read as a stale capture.
+func (k *TicketKey) IssueFullFor(ticket []byte) ([]byte, error) {
+	clientID, psk, issued, err := k.Open(ticket)
+	if err != nil {
+		return nil, err
+	}
+	return k.seal(clientID, psk, FullTicketLen, issued)
 }
 
 // seal builds one ticket. The plaintext is padded to fill ticketLen so every

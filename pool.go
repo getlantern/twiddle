@@ -66,11 +66,30 @@ func ParsePool(s string) ([][]byte, error) {
 }
 
 // CredentialFromWire rebuilds a client credential from its provisioned form.
+//
+// The result is RESUMPTION-ONLY: it carries no full-handshake companion, so
+// every opening it authenticates carries pre_shared_key. Provisioning that can
+// supply both should call CredentialFromWireFull instead -- see
+// docs/full-handshake-carrier.md for why emitting only resumption hellos is a
+// distinguisher.
 func CredentialFromWire(ticket []byte, psk []byte) (*Credential, error) {
+	return CredentialFromWireFull(ticket, nil, psk)
+}
+
+// CredentialFromWireFull rebuilds a credential that can open either handshake
+// shape. fullTicket is the FullTicketLen companion sealed over the same
+// clientID, psk and issue time; nil degrades to resumption-only.
+func CredentialFromWireFull(ticket, fullTicket, psk []byte) (*Credential, error) {
 	if len(psk) != 32 {
 		return nil, fmt.Errorf("twiddle: psk is %d bytes, want 32", len(psk))
 	}
+	if fullTicket != nil && len(fullTicket) != FullTicketLen {
+		return nil, fmt.Errorf("twiddle: full ticket is %d bytes, want %d", len(fullTicket), FullTicketLen)
+	}
 	c := &Credential{Ticket: append([]byte(nil), ticket...)}
+	if fullTicket != nil {
+		c.FullTicket = append([]byte(nil), fullTicket...)
+	}
 	copy(c.PSK[:], psk)
 	return c, nil
 }

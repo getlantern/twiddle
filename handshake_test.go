@@ -83,6 +83,15 @@ func TestEndToEndOverSocket(t *testing.T) {
 	if _, _, _, err := k.Open(next.Ticket); err != nil {
 		t.Fatalf("rotated ticket does not open: %v", err)
 	}
+	// Rotation must carry BOTH tickets. Rotating only the resumption ticket
+	// would let the full-handshake companion age out of MaxAge while the
+	// client kept working, silently collapsing it back to resumption-only.
+	if len(next.FullTicket) != FullTicketLen {
+		t.Fatalf("rotated credential carries a %d-byte full ticket, want %d", len(next.FullTicket), FullTicketLen)
+	}
+	if _, _, _, err := k.Open(next.FullTicket); err != nil {
+		t.Fatalf("rotated full ticket does not open: %v", err)
+	}
 
 	payload := make([]byte, 60000)
 	rand.Read(payload)
