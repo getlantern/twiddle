@@ -89,12 +89,27 @@ func Client(raw net.Conn, cfg ClientConfig) (*Conn, *Credential, error) {
 	if len(cfg.Credential.Ticket) != cfg.Cover.TicketLen {
 		return nil, nil, fmt.Errorf("twiddle: credential ticket length %d does not match cover %d", len(cfg.Credential.Ticket), cfg.Cover.TicketLen)
 	}
-	// Refused here rather than on the wire. A client that opened a full
+	// An EXPLICIT request is validated here rather than on the wire, and it
+	// fails where a Contacts-driven choice degrades. A client that opened a full
 	// handshake against a cover with no measured full profile would get a
 	// guessed certificate flight back, which is worse than not offering the
 	// shape at all.
-	if cfg.FullHandshake && !cfg.Cover.CanEmitFullHandshake() {
-		return nil, nil, fmt.Errorf("twiddle: cover %s has no measured full-handshake profile", cfg.Cover.Host)
+	if cfg.FullHandshake {
+		if !cfg.Cover.CanEmitFullHandshake() {
+			return nil, nil, fmt.Errorf("twiddle: cover %s has no measured full-handshake profile", cfg.Cover.Host)
+		}
+		if len(FullHandshakeCarriers(cfg.Pool)) == 0 {
+			return nil, nil, errors.New("twiddle: no hello in the pool has an ECH payload large enough to carry a full-handshake ticket")
+		}
+	}
+
+	// raw is dereferenced from here on, so a nil one becomes an error rather
+	// than a panic. Deliberately AFTER every config check: Client(nil, cfg) is
+	// how several tests exercise config validation without a socket, and that
+	// ordering keeps a config error reported as a config error. It matters
+	// because the Contacts decision below reads raw.LocalAddr().
+	if raw == nil {
+		return nil, nil, errors.New("twiddle: nil connection")
 	}
 
 	// An explicit request is honoured; otherwise the contact memory decides.
@@ -140,6 +155,8 @@ func Client(raw net.Conn, cfg ClientConfig) (*Conn, *Credential, error) {
 	// others, depending on the draw.
 	candidates := cfg.Pool
 	if full {
+		// Non-empty either way by now: an explicit request was checked above,
+		// and a Contacts-driven one only set full when carriers exist.
 		if candidates = FullHandshakeCarriers(cfg.Pool); len(candidates) == 0 {
 			return nil, nil, errors.New("twiddle: no hello in the pool has an ECH payload large enough to carry a full-handshake ticket")
 		}

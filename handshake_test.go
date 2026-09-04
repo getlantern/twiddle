@@ -1031,3 +1031,51 @@ func TestContactsDegradeWhenTheCredentialHasNoCompanion(t *testing.T) {
 		t.Error("a degraded connection was recorded")
 	}
 }
+
+// Client(nil, cfg) is how several tests exercise config validation without a
+// socket, so raw is not dereferenced until every config check has run. The
+// Contacts decision reads raw.LocalAddr(), which put a dereference inside that
+// region -- with Contacts set, a nil conn panicked instead of erroring.
+//
+// Both halves of the contract are asserted, because a fix that only stopped the
+// panic could easily have reported "nil connection" for a config error too.
+func TestClientReportsANilConnectionRatherThanPanicking(t *testing.T) {
+	k := ticketKey(t)
+	cover := fullCover(t)
+	cred, err := k.Issue(350, cover.TicketLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("with Contacts set, a nil conn errors", func(t *testing.T) {
+		_, _, err := Client(nil, ClientConfig{
+			Pool: pool(t), Cover: cover, Credential: cred,
+			Contacts: NewContactMemory(time.Hour, 0),
+		})
+		if err == nil {
+			t.Fatal("a nil connection was accepted")
+		}
+		if !contains(err.Error(), "nil connection") {
+			t.Errorf("unhelpful error: %v", err)
+		}
+	})
+
+	t.Run("a config error still wins over the nil conn", func(t *testing.T) {
+		// Same nil conn, but the credential does not match the cover. The
+		// config error is the useful one and must be what comes back.
+		bad, err := k.Issue(351, cover.TicketLen+1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, err = Client(nil, ClientConfig{
+			Pool: pool(t), Cover: cover, Credential: bad,
+			Contacts: NewContactMemory(time.Hour, 0),
+		})
+		if err == nil {
+			t.Fatal("a mismatched credential was accepted")
+		}
+		if !contains(err.Error(), "ticket length") {
+			t.Errorf("got %q, want the config error rather than the nil-conn one", err)
+		}
+	})
+}
