@@ -991,3 +991,43 @@ func TestContactsRecordOnlyCompletedHandshakes(t *testing.T) {
 		t.Error("after a FAILED full handshake the next connection would resume, with no completed predecessor for a censor to have seen")
 	}
 }
+
+// The degradation case that will actually happen in production, and the one the
+// other two degrade tests missed.
+//
+// CredentialFromWire leaves the companion ticket nil, so every client
+// provisioned before lantern-cloud emits full_ticket is resumption-only. If the
+// contact memory can flip to a full handshake without checking the credential,
+// Twiddle then refuses the connection -- so enabling Contacts ahead of
+// provisioning would break every connection rather than quietly resuming.
+func TestContactsDegradeWhenTheCredentialHasNoCompanion(t *testing.T) {
+	k := ticketKey(t)
+	cover := fullCover(t)
+	mem := NewContactMemory(time.Hour, 0)
+
+	issued, err := k.Issue(340, cover.TicketLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exactly what CredentialFromWire produces.
+	cred, err := CredentialFromWire(issued.Ticket, issued.PSK[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cred.FullTicket != nil {
+		t.Fatal("CredentialFromWire produced a companion ticket; this test proves nothing")
+	}
+
+	cf, sf, err := dialOnce(t, k, cover,
+		ClientConfig{Pool: pool(t), Cover: cover, Credential: cred, Contacts: mem},
+		NewReplayCache(64, time.Hour))
+	if err != nil {
+		t.Fatalf("a resumption-only credential was refused instead of degrading: %v", err)
+	}
+	if cf || sf {
+		t.Errorf("client-full=%v server-full=%v from a credential with no companion ticket", cf, sf)
+	}
+	if mem.Tracked() != 0 {
+		t.Error("a degraded connection was recorded")
+	}
+}

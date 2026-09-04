@@ -458,7 +458,7 @@ func Twiddle(harvested []byte, opt Options) (wire []byte, eph *ecdh.PrivateKey, 
 			return nil, nil, fmt.Errorf("twiddle: credential carries a %d-byte full ticket, want %d; it cannot open a full handshake",
 				len(opt.Credential.FullTicket), FullTicketLen)
 		}
-		if err := h.SetECHTicketAuth(opt.Credential.FullTicket, opt.Credential.PSK[:]); err != nil {
+		if err := h.SetECHTicketAuth(opt.Credential.FullTicket, opt.Credential.PSK); err != nil {
 			return nil, nil, err
 		}
 		return h.Marshal(), eph, nil

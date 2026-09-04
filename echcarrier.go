@@ -152,12 +152,19 @@ func FullHandshakeCarriers(pool [][]byte) [][]byte {
 // random directly and the ECH payload through rerandECHGrease, so this must
 // follow it and not merely follow SetKeyShare.
 //
+// psk is [32]byte rather than a slice on purpose. A slice would let a caller
+// pass a nil or short psk, which HMAC accepts silently -- the emitted hello
+// would then be well formed and simply never authenticate, surfacing as a MAC
+// failure on a server that is not the one holding the bug. The array makes that
+// a compile error instead, which is how Credential, TicketKey and SetTicketAuth
+// already carry key material.
+//
 // Unlike the binder, which mirrors RFC 8446's Truncate() and therefore covers
 // only a prefix, this MAC covers the whole hello. There is no truncation rule
 // to honour here because the field is not a TLS binder, so the stronger
 // construction is also the simpler one: SNI, key_share and the ECH padding are
 // all bound.
-func (h *ClientHello) SetECHTicketAuth(ticket []byte, psk []byte) error {
+func (h *ClientHello) SetECHTicketAuth(ticket []byte, psk [32]byte) error {
 	if len(ticket) != FullTicketLen {
 		return fmt.Errorf("twiddle: full-handshake ticket is %d bytes, want %d", len(ticket), FullTicketLen)
 	}
@@ -186,7 +193,7 @@ func (h *ClientHello) SetECHTicketAuth(ticket []byte, psk []byte) error {
 	}
 
 	h.Random = [32]byte{}
-	m := hmac.New(sha256.New, fullMACKey(psk))
+	m := hmac.New(sha256.New, fullMACKey(psk[:]))
 	m.Write(h.Marshal())
 	copy(h.Random[:], m.Sum(nil))
 	return nil

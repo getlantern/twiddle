@@ -113,7 +113,17 @@ func Client(raw net.Conn, cfg ClientConfig) (*Conn, *Credential, error) {
 		wantFull, gen := cfg.Contacts.needsFull(raw.LocalAddr(), raw.RemoteAddr(), time.Now())
 		contactGen = gen
 		if !full && wantFull {
-			full = cfg.Cover.CanEmitFullHandshake() && len(FullHandshakeCarriers(cfg.Pool)) > 0
+			// All three have to be able to back the shape, and the CREDENTIAL
+			// is the one that will be missing in practice: CredentialFromWire
+			// leaves the companion nil, so every client provisioned before
+			// lantern-cloud emits full_ticket is resumption-only. Omitting this
+			// check made Contacts flip full to true and then fail in Twiddle,
+			// refusing the connection instead of degrading -- which would have
+			// broken every connection the moment Contacts was enabled ahead of
+			// provisioning.
+			full = cfg.Cover.CanEmitFullHandshake() &&
+				len(FullHandshakeCarriers(cfg.Pool)) > 0 &&
+				len(cfg.Credential.FullTicket) == FullTicketLen
 		}
 	}
 

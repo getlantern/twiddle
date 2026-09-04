@@ -43,7 +43,7 @@ func TestECHCarrierRoundTrip(t *testing.T) {
 	if _, err := h.SetKeyShare(); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.SetECHTicketAuth(full, cred.PSK[:]); err != nil {
+	if err := h.SetECHTicketAuth(full, cred.PSK); err != nil {
 		t.Fatal(err)
 	}
 
@@ -144,7 +144,7 @@ func TestECHCarrierMACCoversTheWholeHello(t *testing.T) {
 			if _, err := h.SetKeyShare(); err != nil {
 				t.Fatal(err)
 			}
-			if err := h.SetECHTicketAuth(full, cred.PSK[:]); err != nil {
+			if err := h.SetECHTicketAuth(full, cred.PSK); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := VerifyECHTicketAuth(h, k, time.Hour); err != nil {
@@ -170,7 +170,7 @@ func TestECHCarrierRejectsAForeignPSK(t *testing.T) {
 	var wrong [32]byte
 	copy(wrong[:], cred.PSK[:])
 	wrong[0] ^= 0x01
-	if err := h.SetECHTicketAuth(full, wrong[:]); err != nil {
+	if err := h.SetECHTicketAuth(full, wrong); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := VerifyECHTicketAuth(h, k, time.Hour); err == nil {
@@ -192,7 +192,7 @@ func TestECHCarrierAndResumptionAreExclusive(t *testing.T) {
 	if err := h.SetTicketAuth(cred, 32); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.SetECHTicketAuth(full, cred.PSK[:]); err == nil {
+	if err := h.SetECHTicketAuth(full, cred.PSK); err == nil {
 		t.Error("SetECHTicketAuth accepted a hello that still carries pre_shared_key")
 	}
 	if _, err := VerifyECHTicketAuth(h, k, time.Hour); err == nil {
@@ -214,7 +214,7 @@ func TestECHCarrierRejectsAnExpiredTicket(t *testing.T) {
 	if _, err := h.SetKeyShare(); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.SetECHTicketAuth(old, cred.PSK[:]); err != nil {
+	if err := h.SetECHTicketAuth(old, cred.PSK); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := VerifyECHTicketAuth(h, k, 24*time.Hour); err == nil {
@@ -240,7 +240,7 @@ func TestECHCarrierRefusesAPayloadTooSmallToCarryATicket(t *testing.T) {
 				break
 			}
 		}
-		if err := h.SetECHTicketAuth(full, cred.PSK[:]); err == nil {
+		if err := h.SetECHTicketAuth(full, cred.PSK); err == nil {
 			t.Error("a hello with no ECH extension was accepted as a carrier")
 		}
 	})
@@ -255,7 +255,7 @@ func TestECHCarrierRefusesAPayloadTooSmallToCarryATicket(t *testing.T) {
 		if n, err := h.ECHPayloadLen(); err != nil || n != short {
 			t.Fatalf("payload is %d (%v), want %d", n, err, short)
 		}
-		err := h.SetECHTicketAuth(full, cred.PSK[:])
+		err := h.SetECHTicketAuth(full, cred.PSK)
 		if err == nil {
 			t.Fatal("a payload too small for the ticket was accepted")
 		}
@@ -280,7 +280,7 @@ func TestECHCarrierRefreshesThePaddingItself(t *testing.T) {
 			t.Fatal(err)
 		}
 		// Deliberately NO Rerandomize: the padding must not come from the pool.
-		if err := h.SetECHTicketAuth(full, cred.PSK[:]); err != nil {
+		if err := h.SetECHTicketAuth(full, cred.PSK); err != nil {
 			t.Fatal(err)
 		}
 		pay, err := echPayload(h.Find(ExtECH))
@@ -316,7 +316,7 @@ func TestECHCarrierEmitsAFullHandshakeShape(t *testing.T) {
 		if _, err := h.SetKeyShare(); err != nil {
 			t.Fatal(err)
 		}
-		if err := h.SetECHTicketAuth(full, cred.PSK[:]); err != nil {
+		if err := h.SetECHTicketAuth(full, cred.PSK); err != nil {
 			t.Fatal(err)
 		}
 
