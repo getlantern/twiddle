@@ -236,6 +236,8 @@ All of it mutation-tested — every guarantee below has a deliberate break that 
 | `Options.FullHandshake`, `pre_shared_key` stripped from the template | `twiddle.go` |
 | `ClientConfig.FullHandshake`, server dispatch on PSK presence, jittered emission, two-record rotation | `handshake.go` |
 | `FullHandshakeCarriers` — the pool is not uniform, so the draw must be restricted | `echcarrier.go` |
+| `ContactMemory` — the mix policy: full on first contact, resumed after, re-full past the horizon | `contacts.go` |
+| `Conn.FullHandshake()` — which shape a connection used, so the deployed mix can be counted | `conn.go` |
 | `ProbeResult.RemainderJitter`, filled by `SampleFull` | `cover.go`, `harvest/coverprobe` |
 
 Measured end to end against the microsoft profile: **ServerHello 1215, ccs 6, remainder
@@ -252,31 +254,55 @@ Three decisions worth knowing, because each looks like an omission until you see
   carry one — they come from real browsing, which resumes, and the hellos in `harvest/testdata` do. The
   emitted hello is then shorter than its source by exactly that extension, which is precisely the
   difference between a real Chrome resumption hello and a real Chrome full one.
+- **Every uncertainty in `ContactMemory` resolves toward a full handshake.** A forgotten entry, an evicted
+  one, a restarted process, a changed local address, an expired horizon — each produces an *extra* full
+  handshake, which costs 5–10 KB and looks *more* normal rather than less, since 95%+ of real connections
+  are full handshakes. The opposite mistake is the distinguisher. That asymmetry is what makes a simple
+  entry bound sound here, and it is the **reverse** of `ReplayCache`, where evicting a live entry reopens
+  the window the gate exists to close.
 - **Both tickets of a credential are sealed at the same instant.** `ReplayCache` refuses a ticket older
   than the client's newest, so a one-second skew between them would make whichever path the client used
   *second* look like a stale capture. That failure is invisible to a test of either path alone.
 
 ## What remains
 
-1. **Mix policy — the last twiddle-side question.** `ClientConfig.FullHandshake` is per-connection, so the
-   mechanism is in place and the policy is the caller's. What still needs deciding is the **re-full
-   cadence**: the censor's flow history is finite and the client's context changes, so a reconnection a
-   week later, from a different network, after the egress IP rotated, has no observable predecessor even
-   though the ticket is valid. Some trigger — new local address, new egress IP, elapsed time — has to force
-   a fresh full handshake. Note the resulting ratio will sit *far above* 4% (a long-lived muxed tunnel
-   opens few outer connections, so one full per handful of resumed), and that is the correct outcome: what
-   a censor can check is whether the predecessor exists, not whether we hit a population average.
-2. **Provisioning the companion ticket.** lantern-cloud's `GenerateTwiddle` (PR #3291, draft) must emit
+1. **Provisioning the companion ticket.** lantern-cloud's `GenerateTwiddle` (PR #3291, draft) must emit
    `full_ticket` alongside `ticket` and `psk`, and lantern-box must pass it to `CredentialFromWireFull`.
    Until then a provisioned client is resumption-only, which degrades to today's behaviour rather than
    failing. `cmd/twiddlecred` already prints it.
-3. **A probed full profile per egress.** `CanEmitFullHandshake()` gates both ends on `FullRemainder`, which
+2. **A probed full profile per egress.** `CanEmitFullHandshake()` gates both ends on `FullRemainder`, which
    the table ships empty on purpose, so nothing offers the path until `coverprobe.SampleFull` has run
    against the live upstream and `Adopt` has taken the result. The startup-probe plumbing is the same work
    the resumed profile needs.
-4. **`sessionTicketWire = 370` is still wrong for all three covers** (microsoft was measured at 303,
+3. **`sessionTicketWire = 370` is still wrong for all three covers** (microsoft was measured at 303,
    cloudflare and google issue none unprompted). Pre-existing; rotation now sends two records, which is
    closer to microsoft's measured pair, but the size itself is untouched.
+
+### The mix policy, and the one number in it
+
+`ContactMemory` keys on the (local address, egress address) pair and asks a single question: has this
+client completed a full handshake to this egress recently enough that a censor still remembers it?
+
+- **First contact → full.** There is no ticket-less alternative to explain, and no ratio to tune.
+- **Afterwards → resumed**, which is what a real client with a live ticket does.
+- **Past the horizon → full again**, because a censor's flow history is finite.
+
+`DefaultContactHorizon` is **6 hours**, and it is a guess with a direction. The true retention is
+unknowable; flow-record retention is commonly days, so six hours sits well inside it, and the cost of
+being wrong this way is one extra full handshake per egress per six hours — tens of kilobytes a day.
+Erring long risks emitting exactly the resumption-without-predecessor the carrier exists to remove.
+
+Two caller obligations, both operational rather than API:
+
+1. **Call `Reset()` on a network change.** The local address is a weak proxy: behind NAT two different
+   networks can both hand out `192.168.1.5`, and the move goes unnoticed. radiance and lantern-box already
+   detect network changes for VPN reconnection, so this is a wire-up, not new machinery.
+2. **Count `Conn.FullHandshake()`.** A memory that degraded on every connection, because no cover was ever
+   probed, looks identical to one that is working. The deployed mix is the only evidence it works.
+
+State is in-memory only, so a restart re-fulls every egress. That is the safe direction and is left alone
+deliberately — persisting it would trade a few kilobytes for a file that, if stale, emits the exact shape
+we are avoiding.
 
 ## Traps worth knowing before starting
 
