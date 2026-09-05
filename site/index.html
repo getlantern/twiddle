@@ -18,10 +18,11 @@
     <p class="eyebrow rise">getlantern/twiddle</p>
     <h1 class="rise">Ordinary<br>on the wire.</h1>
     <p class="lede narrow rise">
-      A censorship-resistant transport whose opening bytes are a <strong>genuine ClientHello
-      harvested from a real browser</strong>. We change seven things in it. Everything else
-      is exactly what Chrome sent.
+      An experimental TLS-shaped transport built from a <strong>genuine ClientHello
+      harvested from a real browser</strong>. Fresh keys, two authentication carriers, and
+      measured record shapes — without a TLS stack in the shipped transport.
     </p>
+    <p class="note">Updated 5 September 2026 · <a href="#rewrites">Exactly what changes</a> · <a href="#status">Implementation &amp; rollout status</a> · <a href="#full-handshake">The full-handshake carrier</a></p>
     <p class="tagline rise">
       A gray sedan on a motorway is not hidden. It is simply not worth pulling over —<br>
       and pulling it over means pulling over ten thousand identical cars.
@@ -29,28 +30,30 @@
   </div>
 </header>
 
-<section>
+<section id="opening">
   <div class="wrap">
     <p class="eyebrow">01 — the opening</p>
-    <h2>Why only the first two records matter</h2>
+    <h2>Opaque payloads. Observable shapes.</h2>
     <div class="narrow">
       <p>
         Every TLS 1.3 handshake message after the ServerHello is encrypted and framed as an
-        <code>application_data</code> record. Measured against real servers, the entire observable
-        structure of a TLS connection is four records and then opaque noise forever.
+        <code>application_data</code> record. The contents become opaque, but record sizes,
+        counts, timing, destination addresses, and connection history remain observable.
       </p>
       <p>
         So the connection does not have to <em>be</em> TLS. It has to <em>open</em> like TLS. Everything
-        past the ServerHello is shape, not protocol — which is why a harvested ClientHello, a
-        synthesised ServerHello, and an ordinary AEAD tunnel are indistinguishable from the real thing.
+        past the ServerHello still needs measured shaping. A harvested ClientHello, a synthesised
+        ServerHello, and an AEAD tunnel are the design — not a proof of indistinguishability.
+        Active probing and traffic analysis remain part of the threat model.
       </p>
     </div>
     <table>
       <tr><th>Record</th><th>Type</th><th>Fidelity required</th></tr>
       <tr><td>ClientHello</td><td class="num">0x16</td><td><em>exact</em> — harvested from a real browser</td></tr>
       <tr><td>ChangeCipherSpec</td><td class="num">0x14</td><td>one fixed byte</td></tr>
-      <tr><td>ServerHello</td><td class="num">0x16</td><td>structurally plausible — 1221 B, measured</td></tr>
-      <tr><td>everything after, forever</td><td class="num">0x17</td><td>shape only — opaque to any observer</td></tr>
+      <tr><td>ServerHello</td><td class="num">0x16</td><td>1215 B full / 1221 B resumed in the measured profiles</td></tr>
+      <tr><td>compatibility ChangeCipherSpec</td><td class="num">0x14</td><td>fixed framing, before encrypted records</td></tr>
+      <tr><td>encrypted handshake, data &amp; alerts</td><td class="num">0x17</td><td>opaque contents; observable lengths, counts, and timing</td></tr>
     </table>
   </div>
 </section>
@@ -60,10 +63,11 @@
     <p class="eyebrow">02 — the bytes</p>
     <h2>A real ClientHello, and what we touch</h2>
     <p class="narrow">
-      Below is an actual ClientHello captured from Chrome 151, byte for byte — <span id="total"></span> of them.
+      Below is a historical ClientHello captured from Chrome 151, byte for byte — <span id="total"></span> of them.
       Hover any byte, or any field in the list, to see what it is and whether we change it.
-      Notice how little is coloured.
+      The annotations describe current rewrites; the bytes are the original capture, not a freshly emitted hello.
     </p>
+    <p class="narrow note">Chrome 152 measurements no longer include <code>server_padding</code> (<code>0x12e0</code>) and do include a varying 206-byte <code>0xca34</code> body. This sample is not a current-browser fingerprint recommendation. <a href="#sources">Use fresh device captures.</a></p>
 
     <div class="legend">
       <span><i class="sw-keep"></i>copied verbatim</span>
@@ -81,9 +85,9 @@
         <span class="tag keep" id="ptag">hover a byte</span>
         <h3 id="pname">The whole record</h3>
         <div class="where" id="pwhere"></div>
-        <p id="pnote">Chrome permutes its extension order on every single connection — eight
-        connections produced eight distinct orderings. So there is no canonical order to preserve,
-        and appending <code>pre_shared_key</code> is legal against any harvested hello.</p>
+        <p id="pnote">These are original captured bytes. Twiddle shuffles interior extensions and
+        rewrites selected fields; a highlighted field can contain unchanged bytes too. Resumption
+        appends pre_shared_key; full-handshake mode uses ECH and random instead.</p>
       </aside>
     </div>
   </div>
@@ -91,18 +95,60 @@
 
 <section>
   <div class="wrap">
-    <p class="eyebrow">03 — the seven</p>
-    <h2>Every field we change, and why</h2>
+    <p class="eyebrow">03 — the rewrites</p>
+    <h2 id="rewrites">Exactly what changes</h2>
+    <p class="narrow">Twiddle transforms a captured ClientHello; it does not generate a browser
+      fingerprint from scratch. The list below describes the implementation at
+      <a href="https://github.com/getlantern/twiddle/tree/c78665a55653bbd217560a7d9116cf7e3eb396c5"><code>c78665a</code></a>.
+      Fields are modified only where present unless a mode explicitly adds or removes an extension.</p>
+    <h3>On every connection</h3>
     <table>
-      <tr><th>Field</th><th>What we do</th><th>Why</th></tr>
-      <tr><td class="num">server_name</td><td>rewrite</td><td>Point the SNI at the cover domain this egress masquerades as. The only length change we make deliberately — it cascades through five nested length fields.</td></tr>
-      <tr><td class="num">random</td><td>re-randomise</td><td>32 bytes of client entropy. Replaying a captured value would repeat one browser's nonce across every connection we make.</td></tr>
-      <tr><td class="num">legacy_session_id</td><td>re-randomise</td><td>Chrome sends 32 random bytes here on every hello measured. The server must echo it, so anything hidden here appears <em>twice</em> on the wire.</td></tr>
-      <tr><td class="num">key_share</td><td>fresh, valid keys</td><td>A real X25519 <em>and</em> a real ML-KEM-768 key each time. Filling them with random bytes made live servers reply <code>illegal_parameter</code> — which would have handed a censor a replay distinguisher.</td></tr>
-      <tr><td class="num">encrypted_client_hello</td><td>re-randomise + resize</td><td>Chrome's GREASE ECH varies per connection in 32-byte buckets — 186, 218, 250, 282 — independently of SNI length. uTLS holds it constant, which is its own tell.</td></tr>
-      <tr><td class="num">extension order</td><td>shuffle</td><td>Chrome permutes the interior on <em>every</em> connection. Emitting a fixed order is something Chrome never does, so shuffling is fidelity, not obfuscation.</td></tr>
-      <tr><td class="num">pre_shared_key</td><td>append</td><td>Carries the authenticator. RFC 8446 requires it last, so appending is the only legal placement — and it turns a full hello into a resumption hello, which is what we want to look like.</td></tr>
+      <tr><th>Field</th><th>What we do</th><th>Exact behavior</th></tr>
+      <tr><td class="num">server_name</td><td>replace hostname</td><td>Use the configured cover SNI when provided. Recompute its nested lengths; do not compensate with padding to preserve the original message size.</td></tr>
+      <tr><td class="num">random</td><td>fresh entropy / MAC</td><td>Fresh random bytes on the resumed path. On the full path, a 32-byte MAC binds the entire final ClientHello, including the key share and ECH padding.</td></tr>
+      <tr><td class="num">legacy_session_id</td><td>fresh bytes, same length</td><td>Preserve the template's length, usually 32 bytes. The server echoes this value, so anything hidden here appears twice on the wire.</td></tr>
+      <tr><td class="num">key_share: X25519</td><td>fresh valid public key</td><td>The standalone X25519 entry is replaced with a newly generated public key. Twiddle retains its private key for the actual tunnel key agreement.</td></tr>
+      <tr><td class="num">key_share: X25519MLKEM768</td><td>fresh valid hybrid share</td><td>If offered, generate an ML-KEM-768 encapsulation key (1184 bytes) and an X25519 public key (32 bytes). These private keys are discarded: the advertised hybrid share does <strong>not</strong> give Twiddle post-quantum forward secrecy.</td></tr>
+      <tr><td class="num">key_share: GREASE</td><td>zero placeholder contents</td><td>The measured GREASE entry carries one zero byte, not random data. The current fallback also zeroes unrecognized key-share groups; it does not implement arbitrary group key generation.</td></tr>
+      <tr><td class="num">encrypted_client_hello</td><td>refresh outer GREASE ECH</td><td>Fresh one-byte <code>config_id</code>, fresh 32-byte <code>enc</code>, and random payload. Choose the payload length uniformly from 144, 176, 208, or 240 bytes (extension bodies: 186, 218, 250, or 282 bytes, excluding the four-byte extension header). Preserve the HPKE KDF/AEAD IDs. No ECH extension is added when absent; inner ECH is not regenerated.</td></tr>
+      <tr><td class="num">GREASE identifiers</td><td>redraw from 16 values</td><td>Replace GREASE in cipher suites, extension types, supported groups, key-share group IDs, supported versions, and signature algorithms where present. Supported-group and key-share IDs match. The first and last GREASE extension IDs must differ; other slots may coincide. Ordinary IDs and list ordering stay unchanged.</td></tr>
+      <tr><td class="num">extension order</td><td>shuffle the interior</td><td>Uniform Fisher–Yates permutation, with the leading GREASE pinned first and trailing GREASE pinned last. On resumption, <code>pre_shared_key</code> follows the trailing GREASE.</td></tr>
+      <tr><td class="num">lengths &amp; framing</td><td>serialize again</td><td>Recompute affected nested lengths, total extension length, handshake length, and record length. Emit one handshake record (<code>0x16</code>) with record version <code>0x0301</code> and ClientHello message type <code>0x01</code>. Preserve the separate ClientHello <code>legacy_version</code>.</td></tr>
     </table>
+    <div class="narrow">
+      <h3>Authentication: two different final edits</h3>
+      <p><strong>Resumption-shaped opening.</strong> Replace any existing <code>pre_shared_key</code>
+        with one containing the supplied Twiddle credential ticket, a fresh random four-byte
+        <code>obfuscated_ticket_age</code> (not elapsed ticket age), and a newly computed 32- or
+        48-byte binder. The binder is Twiddle's PSK-derived HMAC over the final serialized hello
+        truncated at the binders, not an interoperable TLS binder calculation. This extension is last.
+        The credential ticket is supplied, not newly minted by each call to <code>Twiddle</code>.</p>
+      <p><strong>Full-handshake-shaped opening.</strong> Remove <code>pre_shared_key</code>.
+        Put the 144-byte companion ticket at the start of the ECH payload and fill the remainder
+        with fresh random bytes. Zero <code>ClientHello.random</code> for the calculation, compute
+        a domain-separated HMAC-SHA256 over the <em>entire</em> serialized hello, then place that
+        32-byte MAC in <code>random</code>. A usable ECH carrier is required.</p>
+      <h3>What stays unchanged</h3>
+      <p>Ordinary cipher suites and their ordering, ALPN, non-GREASE supported groups, versions
+        and signature algorithms, compression methods, and otherwise unhandled extension payloads
+        are copied from the template. Extension ordering changes their offsets, not their contents.</p>
+      <p><strong>This is an explicit rewrite list, not automatic browser-behavior discovery.</strong>
+        For example, Chrome's newer varying <code>0xca34</code> payload is currently copied, not
+        regenerated. Twiddle does not add or remove that extension, or <code>0x12e0</code>, to
+        turn an old capture into a newer browser fingerprint.</p>
+      <h3>Before that: import-time sanitization</h3>
+      <p>When templates pass through <code>Sanitize</code>, replace the captured SNI with
+        same-length <code>x</code> characters, remove captured <code>pre_shared_key</code> and
+        <code>early_data</code>, empty the legacy <code>session_ticket</code> payload, and zero
+        <code>random</code> and the session-ID contents. These are import-time changes, separate
+        from the per-connection rewrites. Calling <code>Twiddle</code> directly on a raw capture
+        does not itself run this sanitizer.</p>
+      <p class="note">Source: <a href="https://github.com/getlantern/twiddle/blob/c78665a55653bbd217560a7d9116cf7e3eb396c5/twiddle.go">transformations</a> ·
+        <a href="https://github.com/getlantern/twiddle/blob/c78665a55653bbd217560a7d9116cf7e3eb396c5/auth.go">keys &amp; resumption</a> ·
+        <a href="https://github.com/getlantern/twiddle/blob/c78665a55653bbd217560a7d9116cf7e3eb396c5/echcarrier.go">full-handshake authentication</a> ·
+        <a href="https://github.com/getlantern/twiddle/blob/c78665a55653bbd217560a7d9116cf7e3eb396c5/source.go">sanitization</a> ·
+        <a href="https://github.com/getlantern/twiddle/blob/c78665a55653bbd217560a7d9116cf7e3eb396c5/hello.go">serialization</a>.</p>
+    </div>
   </div>
 </section>
 
@@ -115,14 +161,14 @@
         RFC 8446 §4.2.11.2 defines the PSK binder as
         <code>HMAC(binder_key, Transcript-Hash(Truncate(ClientHello)))</code> — a MAC over the opening,
         keyed by a secret shared with the server. That is exactly the authenticator we needed, in the
-        field TLS already provides for it. We are not injecting anything foreign; we are populating
-        the slot the protocol defines.
+        field TLS already provides for it. Twiddle uses that shape for its own ticket authenticator;
+        it does not establish an interoperable TLS session.
       </p>
       <p>
         Both halves are opaque <em>by specification</em>: a ticket is server-chosen opaque data, and a
         binder is an HMAC under a key derived from it. No observer can validate either without the
-        resumption secret. They are the only ClientHello fields unverifiable by construction rather
-        than by convention.
+        resumption secret. Opaque contents still need the lengths and surrounding structure of
+        the selected cover profile.
       </p>
     </div>
     <table>
@@ -132,9 +178,28 @@
       <tr><td>proof of possession</td><td class="num">binder</td><td class="num">32 B (SHA-256) / 48 B (SHA-384)</td></tr>
     </table>
     <p class="narrow">
-      This is TLS 1.3 <code>psk_dhe_ke</code> exactly — authentication from the pre-shared key,
-      forward secrecy from the Diffie-Hellman.
+      The division of responsibilities resembles TLS 1.3 <code>psk_dhe_ke</code>:
+      authentication from the pre-shared key, forward secrecy from Diffie-Hellman.
+      Twiddle's session and record protocol is its own.
     </p>
+    <div id="full-handshake" class="narrow">
+      <h3>A first contact should not already be a resumption</h3>
+      <p>The <a href="https://github.com/getlantern/twiddle/pull/3">merged full-handshake carrier</a>
+      omits <code>pre_shared_key</code>. Its ticket travels in the GREASE ECH payload;
+      <code>ClientHello.random</code> carries a domain-separated MAC over the whole hello.
+      The X25519 key share still supplies forward secrecy.</p>
+      <p><code>TicketKey.Issue</code> mints a resumed ticket and a <strong>144-byte full ticket</strong>
+      for the same client, PSK, and issuance time. The shared timestamp matters: the replay gate rejects
+      tickets older than the newest one that client has presented. A Microsoft-sized 256-byte resumed
+      ticket cannot fit even the largest measured 240-byte ECH payload.</p>
+      <p><code>ContactMemory</code> chooses full on first contact, then permits resumption after a
+      completed full opening. The default horizon is six hours; a reset, eviction, or process restart
+      asks for another full opening. Network-change callers should reset it explicitly.</p>
+      <p><strong>Capability is not activation.</strong> Automatic selection falls back to resumption
+      unless the credential has a companion ticket, the pool has an ECH carrier, and the cover has a
+      measured full reply profile. An explicit full-handshake request fails if it cannot be supported.
+      The built-in cover table has no full reply profile; per-egress probing is still required.</p>
+    </div>
   </div>
 </section>
 
@@ -204,15 +269,15 @@
           <text x="257" y="50" text-anchor="middle" fill="#f0a500">harvested ClientHello + authenticator</text>
 
           <rect x="392" y="70" width="116" height="22" rx="3" fill="currentColor" fill-opacity=".07" stroke="currentColor" stroke-opacity=".2"/>
-          <text x="450" y="85" text-anchor="middle" fill="currentColor">verify binder</text>
+          <text x="450" y="85" text-anchor="middle" fill="currentColor">auth + replay gate</text>
 
           <!-- authenticated branch -->
           <rect x="20" y="108" width="470" height="96" rx="4" fill="#f0a500" fill-opacity=".05" stroke="#f0a500" stroke-opacity=".22"/>
           <text x="34" y="126" fill="#f0a500" font-size="10.5" letter-spacing="1.4">AUTHENTICATED</text>
           <line x1="444" y1="148" x2="76" y2="148" stroke="currentColor" stroke-width="1.3" marker-end="url(#a)"/>
-          <text x="260" y="141" text-anchor="middle" fill="currentColor">synthesised ServerHello · 1221 B</text>
+          <text x="260" y="141" text-anchor="middle" fill="currentColor">ServerHello · 1215 / 1221 B</text>
           <line x1="444" y1="176" x2="76" y2="176" stroke="currentColor" stroke-width="1.3" marker-end="url(#a)"/>
-          <text x="260" y="169" text-anchor="middle" fill="currentColor">flight — carries the next ticket</text>
+          <text x="260" y="169" text-anchor="middle" fill="currentColor">measured encrypted reply flight</text>
           <line x1="76" y1="196" x2="444" y2="196" stroke="currentColor" stroke-width="2.5" stroke-opacity=".45"/>
           <text x="260" y="190" text-anchor="middle" fill="currentColor" fill-opacity=".75">AEAD tunnel, framed as 0x17 records</text>
 
@@ -227,7 +292,8 @@
       </svg>
       <figcaption>
         The egress never speaks for itself to a peer it cannot authenticate — a prober's own bytes
-        arrive at a genuine server, and the reply is that server's.
+        arrive at a genuine server, and the reply is that server's. Replacement credentials are sent
+        in two ticket-shaped records after both Finished stand-ins, outside the opening burst.
       </figcaption>
     </figure>
 
@@ -252,11 +318,61 @@
     </div>
     <div class="narrow">
       <p>
-        The resumption number is the sharpest example. We designed a whole second mode around the
-        assumption that most connections resume; measurement said 4.1%, and the mode was cut. Browsers
-        open connections to an origin in a parallel burst, so every connection in the burst starts
-        before any session ticket has arrived — one origin took 17 connections and resumed none of them.
+        The resumption number changed the design again: 26 of 636 observed connections resumed;
+        a separate cold-process capture measured 13 of 485 (2.7%). These are samples, not a universal
+        target ratio. The sharper requirement is a visible predecessor: do not always arrive at a
+        new egress already claiming to resume. That motivated the full-handshake carrier and contact
+        memory, rather than a knob tuned to 4.1%.
       </p>
+    </div>
+  </div>
+</section>
+
+<section id="sources">
+  <div class="wrap">
+    <p class="eyebrow">08 — freshness &amp; identity</p>
+    <h2>A pool is not a browser update strategy</h2>
+    <div class="narrow">
+      <p>Prefer this device's current, sanitised browser captures; next try configuration-supplied
+      captures. Sources are not merged. Mixed-build pools are partitioned and the majority build wins.
+      The core requires an explicit opt-in for its embedded snapshot; lantern-box currently enables
+      that fallback, so a working connection does not prove the fingerprint is fresh.</p>
+      <p>Sanitise before persistence: real browsing captures expose visited SNI names and may contain
+      a site's resumption ticket. The historical sample above was captured against <code>localhost</code>.</p>
+      <p>A cover is a complete profile, not a hostname pasted over arbitrary bytes. The consolidated
+      cloud provisioning work requires a measured identity and keeps the dial address pinned to the
+      provisioned egress IP after DNS validation. SNI/address consistency remains a deployment constraint,
+      not something a plausible-looking ClientHello fixes.</p>
+      <p><a href="https://github.com/getlantern/twiddle/blob/main/docs/full-handshake-carrier.md">Full-handshake design</a> ·
+      <a href="https://github.com/getlantern/twiddle/blob/main/docs/ech.md">ECH measurements</a> ·
+      <a href="https://github.com/getlantern/twiddle/blob/main/harvest/testdata/arrival-chrome152.log">Chrome 152 capture log</a></p>
+    </div>
+  </div>
+</section>
+
+<section id="status">
+  <div class="wrap">
+    <p class="eyebrow">09 — implementation ledger · 5 September 2026</p>
+    <h2>What landed. What still needs work.</h2>
+    <table>
+      <tr><th>Layer</th><th>Status</th><th>What it means</th></tr>
+      <tr><td>Core transport</td><td><em>Merged</em></td><td>Full and resumed carriers, per-cover profiles, contact memory, ticket rotation, and a shared replay gate. <a href="https://github.com/getlantern/twiddle/pull/3">Twiddle #3</a>.</td></tr>
+      <tr><td>Record emission</td><td><em>Fixed on main</em></td><td><a href="https://github.com/getlantern/twiddle/pull/2">Twiddle #2</a> serializes sealing, nonce-sequence advancement, and socket writes. Concurrent Write/Close must neither reuse a nonce nor reorder records. Consumers must update their pin to include <code>c78665a</code> or a descendant.</td></tr>
+      <tr><td>lantern-box adapter</td><td><em>Released base</em></td><td>v0.0.123 wires companion tickets and contact memory; a <code>disable_full_handshake</code> switch is available. Full mode remains gated on a measured full profile.</td></tr>
+      <tr><td>Cloud provisioning</td><td>Open PR</td><td><a href="https://github.com/getlantern/lantern-cloud/pull/3291">lantern-cloud #3291</a> consolidates #3292: profile validation, per-client ticket pairs, and pinned egress dialing. This is not a deployment announcement.</td></tr>
+      <tr><td>UDP tunneling</td><td>Under review</td><td><a href="https://github.com/getlantern/lantern-box/pull/321">lantern-box #321</a> adds UoT, matching Samizdat: connected UDP and multi-destination packets inside Twiddle's TCP stream. Both endpoints need the adapter update; this is not native UDP or QUIC transport.</td></tr>
+      <tr><td>Multiplexing &amp; credential reuse</td><td>Open gap</td><td>The earlier <a href="https://github.com/getlantern/lantern-box/pull/319">#319</a> was closed without merging. The released adapter's credential reuse can conflict with the core's single-use replay gate during concurrent openings.</td></tr>
+    </table>
+    <div class="narrow">
+      <h3>Known limits, not hidden guarantees</h3>
+      <p>Per-egress full-profile probing and client activation still need integration. The fixed
+      370-byte rotation records are a known cover-fidelity mismatch. The varying body of Chrome 152's
+      <code>0xca34</code> extension is sampled from captures, not regenerated. A replay cache pushed to
+      its client-capacity limit can evict a still-valid entry. These bounds matter alongside packet
+      sizes, timing, and destination consistency.</p>
+      <p>The nonce-race fix does not make shutdown bounded: <code>Close</code> can still wait on a
+      stalled socket without a caller-supplied write deadline. Passing local and CI tests is evidence
+      about tested behavior, not a claim that every observer sees ordinary TLS.</p>
     </div>
   </div>
 </section>
