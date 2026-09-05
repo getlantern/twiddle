@@ -66,6 +66,7 @@
       Below is a historical ClientHello captured from Chrome 151, byte for byte — <span id="total"></span> of them.
       Hover any byte, or any field in the list, to see what it is and whether we change it.
       The annotations describe current rewrites; the bytes are the original capture, not a freshly emitted hello.
+      <a href="#sample-walkthrough">Read the complete field-by-field walkthrough.</a>
     </p>
     <p class="narrow note">Chrome 152 measurements no longer include <code>server_padding</code> (<code>0x12e0</code>) and do include a varying 206-byte <code>0xca34</code> body. This sample is not a current-browser fingerprint recommendation. <a href="#sources">Use fresh device captures.</a></p>
 
@@ -95,6 +96,54 @@
 
 <section>
   <div class="wrap">
+    <div id="sample-walkthrough" class="sample-walkthrough">
+      <h2>One template. Every field accounted for.</h2>
+      <p class="narrow">This is the same 1,827-byte capture shown above: 19 extensions, SNI
+        <code>localhost</code>, no <code>pre_shared_key</code>, and no <code>early_data</code>.
+        Offsets below are decimal, zero-based, inclusive, and refer to the <em>original record</em>,
+        including its five-byte TLS header. Expand any entry for its nested fields and original bytes.</p>
+      <p class="narrow">“Copied” means the value survives, not its position: all 17 interior
+        extensions are shuffled. Each extension's two-byte type and two-byte body length are
+        serialized again. Lengths inside untouched payloads are copied; SNI and ECH builders
+        regenerate their own nested lengths. Signature names follow the
+        <a href="https://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml#tls-signaturescheme">IANA registry</a>.
+        The behavior follows the
+        <a href="#rewrites">source-pinned implementation below</a>, not a complete TLS negotiation.</p>
+      <p class="sample-hash">Capture SHA-256 <code>915b694a5e04f7caf82d7d58168d2092af1d9df21ed2b69060f4d0cc97452006</code></p>
+      <button type="button" id="sample-expand" aria-controls="sample-fields" aria-expanded="false">Expand all fields</button>
+      <div id="sample-fields"></div>
+      <noscript><p>Enable JavaScript to read the byte-derived walkthrough. The general rewrite reference below remains available without it.</p></noscript>
+      <h3>GREASE is several independent slots, not one replacement</h3>
+      <p class="narrow">The captured cipher <code>4a4a</code>, leading extension <code>baba</code>,
+        trailing extension <code>2a2a</code>, group <code>6a6a</code>, and version <code>1a1a</code>
+        are redrawn from <code>0a0a, 1a1a, …, fafa</code>. The group draw is reused for the
+        key-share group. The two extension draws must differ; otherwise draws can coincide,
+        including with their captured values. Neither GREASE extension payload changes: the
+        first stays empty, the last stays <code>00</code>. This sample has no GREASE signature ID.
+        ECH GREASE is a separate mechanism: <code>fe0d</code> stays fixed while its body is rebuilt.</p>
+      <h3>What gets added after these 1,827 bytes are transformed?</h3>
+      <p class="narrow"><strong>Resumption:</strong> append extension <code>0029</code> after the
+        trailing GREASE. For ticket length <code>T</code> and binder length <code>B</code>, its body is:
+        two-byte identities length <code>T + 6</code>; two-byte identity length <code>T</code>;
+        the supplied ticket's <code>T</code> bytes; four random age bytes; two-byte binders length
+        <code>B + 1</code>; one-byte binder length <code>B</code>; and <code>B</code> freshly computed
+        HMAC bytes. Its body length is <code>T + B + 11</code>, and the whole extension adds
+        <code>T + B + 15</code> bytes. The output has 20 extensions.</p>
+      <p class="narrow"><strong>Full:</strong> add no extension. Keep 19 extensions; put the
+        144-byte companion ticket at the start of the new ECH payload and retain random padding
+        after it. The final 32-byte random field becomes the whole-hello authentication MAC.
+        Neither mode emits the captured keys, captured random, or captured session ID.</p>
+      <p class="narrow"><strong>Size accounting:</strong> with cover hostname length <code>N</code>
+        bytes and selected ECH payload length <code>P</code>, the full opening is
+        <code>1827 + (N − 9) + (P − 240)</code> bytes. Resumption adds <code>T + B + 15</code>.
+        For a nine-byte hostname, <code>P = 144</code>, <code>T = 176</code>, and <code>B = 32</code>,
+        that is 1,731 bytes full or 1,954 bytes resumed. These are size examples, not fixed outputs:
+        random values and interior extension order change every emission.</p>
+      <p class="narrow"><strong>Import step:</strong> sanitizing this exact sample first changes
+        <code>localhost</code> to nine <code>x</code> bytes and zeros random and session ID.
+        Its legacy session-ticket body is already empty; there is no PSK or early-data extension
+        to remove. Per-connection processing then replaces those placeholders as described here.</p>
+    </div>
     <p class="eyebrow">03 — the rewrites</p>
     <h2 id="rewrites">Exactly what changes</h2>
     <p class="narrow">Twiddle transforms a captured ClientHello; it does not generate a browser

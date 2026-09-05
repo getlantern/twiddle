@@ -30,6 +30,96 @@ const APPENDED = {
   note: "Resumption only: replace any existing PSK extension with the supplied credential ticket, a fresh random four-byte obfuscated_ticket_age, and a newly computed 32- or 48-byte Twiddle HMAC binder. Place last, after trailing GREASE. Full-handshake mode removes this extension and authenticates through ECH and random instead."
 };
 
+const COPY = "Copied unchanged.";
+const SAME_LENGTH = "Serialized again; same value for this sample.";
+const SAMPLE_PARTS = {
+  0: [[1, "content_type", "Handshake (0x16).", "Emitted as 0x16."], [2, "record version", "0x0301, separate from ClientHello.legacy_version.", "Emitted as 0x0301."], [2, "record length", "1822 bytes after the record header.", "Recomputed: total emitted bytes minus 5."]],
+  5: [[1, "handshake type", "ClientHello (0x01).", "Emitted as 0x01."], [3, "handshake body length", "1818 bytes.", "Recomputed: total emitted bytes minus 9."]],
+  9: [[2, "legacy_version", "0x0303 (TLS 1.2 legacy marker).", COPY]],
+  11: [[32, "random", "Captured client random, displayed verbatim here.", "Sanitize zeros it. Resumption replaces it with 32 fresh random bytes. Full mode finally overwrites it with the whole-hello HMAC-SHA256, calculated with this field zeroed."]],
+  43: [[1, "session ID length", "32 bytes.", SAME_LENGTH], [32, "session ID", "Captured compatibility session ID.", "Sanitize zeros it; emission fills all 32 bytes with fresh randomness. The server echoes the new value."]],
+  76: [[2, "cipher-suite vector length", "32 bytes / 16 entries.", SAME_LENGTH], [2, "GREASE cipher", "0x4a4a.", "Replace with the cipher GREASE draw."], ...Array.from({length: 15}, (_, i) => [2, `cipher suite ${i + 2}`, "Ordinary cipher-suite ID; order shown is the advertised preference order.", COPY])],
+  110: [[1, "compression vector length", "One method.", SAME_LENGTH], [1, "compression method", "0x00 (null compression).", COPY]],
+  112: [[2, "extension vector length", "1713 bytes / 19 extensions.", "Recomputed from all serialized extensions; grows further when resumption appends PSK."]],
+  114: [],
+  118: [[2, "group vector length", "10 bytes / five IDs.", COPY], [2, "GREASE group", "0x6a6a.", "Replace with the group GREASE draw; use that same draw in key_share."], [2, "group: X25519MLKEM768", "0x11ec.", COPY], [2, "group: X25519", "0x001d.", COPY], [2, "group: secp256r1", "0x0017.", COPY], [2, "group: secp384r1", "0x0018.", COPY]],
+  134: [[2, "ALPS protocol-list length", "3 bytes.", COPY], [1, "protocol-name length", "2 bytes.", COPY], [2, "ALPS protocol name", "ASCII h2. This is application_settings (0x44cd), not the separate ALPN extension.", "Copied as an opaque payload; Twiddle does not negotiate ALPS settings."]],
+  143: [],
+  147: [[1, "PSK mode vector length", "One mode.", COPY], [1, "PSK mode", "0x01 (psk_dhe_ke).", "Preserved even in the full-shaped opening; advertising a mode does not require offering a PSK."]],
+  153: [[1, "ECH ClientHello type", "0x00 (outer).", "Re-emitted as outer ECH."], [2, "HPKE KDF ID", "0x0001 (HKDF-SHA256).", COPY], [2, "HPKE AEAD ID", "0x0001 (AES-128-GCM).", COPY], [1, "config_id", "Captured 0x17.", "Fresh random byte."], [2, "enc length", "32 bytes.", "Rebuilt as 32."], [32, "enc", "Captured encapsulated-key-shaped bytes.", "Replace with 32 random bytes; no real ECH encryption is performed."], [2, "payload length", "240 bytes.", "Rebuilt from a uniform choice of 144, 176, 208, or 240."], [240, "payload", "Captured opaque ECH payload.", "Resumption: entirely fresh random bytes. Full: first 144 bytes are the supplied companion ticket; remaining bytes are fresh random padding. The original 240 bytes are not replayed."]],
+  439: [[1, "compression-algorithm vector length", "2 bytes.", COPY], [2, "certificate compression algorithm", "0x0002 (Brotli).", "Copied; advertising certificate compression does not make Twiddle implement it."]],
+  446: [[1, "point-format vector length", "One format.", COPY], [1, "EC point format", "0x00 (uncompressed).", COPY]],
+  452: [],
+  456: [[2, "key-share vector length", "1261 bytes, three entries.", COPY], [2, "GREASE key-share group", "0x6a6a.", "Replace with the same GREASE draw as supported_groups."], [2, "GREASE key length", "One byte.", COPY], [1, "GREASE key contents", "0x00.", "Zeroed, so this captured value remains 00."], [2, "hybrid group", "0x11ec (X25519MLKEM768).", COPY], [2, "hybrid key length", "1216 bytes.", COPY], [1184, "ML-KEM-768 encapsulation key", "First part of the hybrid public share.", "Generate a fresh valid ML-KEM-768 key, copy its encapsulation key, discard the private key."], [32, "hybrid X25519 public key", "Second part of the hybrid public share.", "Generate a fresh valid X25519 public key and discard its private key; this is not the tunnel's key agreement."], [2, "standalone group", "0x001d (X25519).", COPY], [2, "standalone key length", "32 bytes.", COPY], [32, "standalone X25519 public key", "Captured public key.", "Rerandomize first refreshes it; SetKeyShare replaces it again and retains that final private key for the actual tunnel key agreement."]],
+  1723: [[1, "certificate status type", "0x01 (OCSP).", COPY], [2, "responder-ID list length", "Zero; no responder IDs follow.", COPY], [2, "request-extensions length", "Zero; no OCSP request extensions follow.", COPY]],
+  1732: [[1, "version vector length", "6 bytes / three IDs.", COPY], [2, "GREASE version", "0x1a1a.", "Replace with the independent version GREASE draw."], [2, "supported version", "0x0304 (TLS 1.3).", COPY], [2, "supported version", "0x0303 (TLS 1.2).", COPY]],
+  1743: [[2, "signature vector length", "22 bytes / eleven IDs.", COPY], ...["mldsa44", "mldsa65", "mldsa87", "ecdsa_secp256r1_sha256", "rsa_pss_rsae_sha256", "rsa_pkcs1_sha256", "ecdsa_secp384r1_sha384", "rsa_pss_rsae_sha384", "rsa_pkcs1_sha384", "rsa_pss_rsae_sha512", "rsa_pkcs1_sha512"].map(name => [2, "signature scheme", name + ". No GREASE in this sample.", COPY])],
+  1771: [],
+  1775: [[2, "server-padding request", "0x1f40 = 8000 bytes, historical 0x12e0 extension.", "Copied as opaque bytes, not removed or recalculated. Preserving this request does not prove the synthesized reply satisfies it."]],
+  1781: [[1, "renegotiated_connection length", "Zero; the renegotiated_connection vector is empty.", COPY]],
+  1786: [[2, "server-name list length", "12 bytes.", "Rebuilt as N + 3 for an N-byte configured cover name."], [1, "server-name type", "0x00 (host_name).", "SetSNI re-emits 0x00."], [2, "hostname length", "9 bytes.", "Rebuilt as N."], [9, "hostname", "ASCII localhost.", "Sanitize writes nine x characters. SetSNI replaces them with the configured cover hostname; a raw Twiddle call with empty CoverSNI leaves the input SNI unchanged."]],
+  1804: [[2, "ALPN list length", "12 bytes.", COPY], [1, "first protocol length", "2 bytes.", COPY], [2, "first protocol", "ASCII h2.", COPY], [1, "second protocol length", "8 bytes.", COPY], [8, "second protocol", "ASCII http/1.1.", "Copied; the advertised ALPN list is not a promise that the tunnel carries HTTP."]],
+  1822: [[1, "trailing GREASE payload", "0x00.", "Copied, not rerandomized. This is separate from the zeroed GREASE key-share byte."]]
+};
+
+const sampleFields = document.getElementById("sample-fields");
+DATA.spans.forEach(span => {
+  const parts = SAMPLE_PARTS[span.off].map(part => [...part]);
+  const extension = span.off >= 114;
+  const type = DATA.hex.slice(span.off * 2, span.off * 2 + 4);
+  if (extension) {
+    parts.unshift(
+      [2, "extension type", "0x" + type + ".", span.name === "GREASE" ? "Redraw this GREASE extension type; leading and trailing types must differ." : SAME_LENGTH],
+      [2, "extension body length", `${span.len - 4} bytes, excluding this four-byte header.`, "Recomputed from the output body. " + ([153, 1786].includes(span.off) ? "Can change when the body is rebuilt." : "Same value for this sample.")]
+    );
+  }
+  const details = document.createElement("details");
+  details.id = "sample-field-" + span.off;
+  details.className = "sample-field";
+  const summary = document.createElement("summary");
+  summary.textContent = `${span.off}–${span.off + span.len - 1} · ${span.name}${extension ? " · 0x" + type : ""} · ${span.len} B`;
+  details.appendChild(summary);
+  const note = document.createElement("p");
+  note.textContent = span.note;
+  if (extension) note.textContent += span.off === 114 ? " Remains first." : span.off === 1822 ? " Remains last among these 19; PSK follows it on resumption." : " This interior extension moves when shuffled.";
+  if (extension && span.len === 4) note.textContent += " Empty body: there are no nested payload fields.";
+  details.appendChild(note);
+  const table = document.createElement("table");
+  const head = document.createElement("tr");
+  for (const label of ["Original offset / field", "Captured bytes & meaning", "Twiddle treatment"]) {
+    const th = document.createElement("th"); th.scope = "col"; th.textContent = label; head.appendChild(th);
+  }
+  table.appendChild(head);
+  let offset = span.off;
+  for (const [length, name, meaning, treatment] of parts) {
+    const row = document.createElement("tr");
+    row.dataset.offset = offset; row.dataset.length = length;
+    const field = document.createElement("td");
+    field.textContent = `${offset}–${offset + length - 1} · ${name}`;
+    const value = document.createElement("td");
+    const hex = document.createElement("code");
+    hex.textContent = DATA.hex.slice(offset * 2, (offset + length) * 2).match(/../g).join(" ");
+    if (length > 32) {
+      const raw = document.createElement("details");
+      const label = document.createElement("summary"); label.textContent = `Show all ${length} captured bytes`;
+      raw.appendChild(label); raw.appendChild(hex); value.appendChild(raw);
+    } else value.appendChild(hex);
+    const decoded = document.createElement("p"); decoded.textContent = meaning; value.appendChild(decoded);
+    const action = document.createElement("td"); action.textContent = treatment;
+    row.appendChild(field); row.appendChild(value); row.appendChild(action); table.appendChild(row);
+    offset += length;
+  }
+  if (offset !== span.off + span.len) throw new Error("Incomplete sample breakdown: " + span.name);
+  details.appendChild(table); sampleFields.appendChild(details);
+});
+const sampleExpand = document.getElementById("sample-expand");
+sampleExpand.addEventListener("click", () => {
+  const expand = Array.from(sampleFields.children).some(field => !field.open);
+  for (const field of sampleFields.children) field.open = expand;
+  sampleExpand.textContent = expand ? "Collapse all fields" : "Expand all fields";
+  sampleExpand.setAttribute("aria-expanded", String(expand));
+});
+
 const grid   = document.getElementById("grid");
 const fields = document.getElementById("fields");
 const ptag   = document.getElementById("ptag");

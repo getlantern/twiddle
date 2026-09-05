@@ -66,6 +66,7 @@ section { padding: 8vh 0; border-bottom: 1px solid var(--line); }
 
 /* ---- byte grid ---- */
 .byteview { display: grid; grid-template-columns: 1fr 340px; gap: 32px; margin-top: 2em; }
+.byteview > div { min-width: 0; }
 @media (max-width: 900px) { .byteview { grid-template-columns: 1fr; } }
 
 .grid {
@@ -109,6 +110,28 @@ section { padding: 8vh 0; border-bottom: 1px solid var(--line); }
 .sw-add     { background: var(--add); }
 footer .note { max-width: 64ch; }
 
+.sample-walkthrough { margin-bottom: 5rem; }
+.sample-hash { font-size: .75rem; overflow-wrap: anywhere; }
+#sample-expand { font: inherit; color: var(--frame); background: var(--surface); border: 1px solid var(--line); padding: .5em .9em; margin: 0 0 1.2em; cursor: pointer; }
+.sample-field { border-top: 1px solid var(--line); padding: .8em 0; }
+.sample-field > summary { font-family: var(--mono); font-size: .85rem; color: var(--bright); cursor: pointer; overflow-wrap: anywhere; }
+.sample-field[open] > summary { color: var(--twiddle); margin-bottom: 1em; }
+.sample-field > p { max-width: 75ch; font-size: .9rem; }
+.sample-field table { table-layout: fixed; }
+.sample-field td { vertical-align: top; overflow-wrap: anywhere; }
+.sample-field td:first-child { width: 25%; font-family: var(--mono); font-size: .8rem; }
+.sample-field td p { margin: .5em 0 0; }
+.sample-field td code { display: block; color: var(--frame); }
+.sample-field td summary { cursor: pointer; }
+summary:focus-visible, #sample-expand:focus-visible { outline: 2px solid var(--frame); outline-offset: 4px; }
+@media (max-width: 600px) {
+  .sample-field table, .sample-field tbody, .sample-field tr, .sample-field td { display: block; width: 100%; }
+  .sample-field th { display: none; }
+  .sample-field tr { padding: .8em 0; border-bottom: 1px solid var(--line); }
+  .sample-field td, .sample-field td:first-child { width: 100%; border: 0; padding: .3em 0; }
+  .sample-field td:last-child::before { content: "Twiddle: "; color: var(--twiddle); }
+}
+
 /* ---- field list ---- */
 /* Columnar so 27 fields stay scannable instead of running off the page. */
 .fields {
@@ -117,6 +140,7 @@ footer .note { max-width: 64ch; }
 }
 @media (max-width: 700px) { .fields { columns: 2; } }
 .fields li {
+  overflow-wrap: anywhere;
   break-inside: avoid;
   border-left: 2px solid var(--line); padding: 2px 0 2px 12px; margin-bottom: 5px;
   font-family: var(--mono); font-size: .78rem; color: var(--dim); cursor: pointer;
@@ -132,7 +156,7 @@ footer .note { max-width: 64ch; }
 .stat .l { font-size: .78rem; color: var(--dim); line-height: 1.4; display: block; margin-top: 4px; }
 
 table { width: 100%; border-collapse: collapse; font-size: .88rem; margin: 1.5em 0; }
-th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
 th { font-family: var(--mono); font-size: .7rem; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); font-weight: 500; }
 td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 td em { color: var(--twiddle); font-style: normal; }
