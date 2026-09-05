@@ -101,7 +101,12 @@
       <p class="narrow">This is the same 1,827-byte capture shown above: 19 extensions, SNI
         <code>localhost</code>, no <code>pre_shared_key</code>, and no <code>early_data</code>.
         Offsets below are decimal, zero-based, inclusive, and refer to the <em>original record</em>,
-        including its five-byte TLS header. Expand any entry for its nested fields and original bytes.</p>
+        including its five-byte TLS header. Expand any entry for a quick explanation of what it
+        does, followed by Twiddle's treatment, nested fields, and original bytes.</p>
+      <p class="narrow">The purpose descriptions explain the fields' roles in TLS, not a claim that
+        Twiddle implements every advertised capability. For background, see
+        <a href="https://www.rfc-editor.org/rfc/rfc8446.html">TLS 1.3 (RFC 8446)</a> and
+        <a href="https://www.rfc-editor.org/rfc/rfc8701.html">GREASE (RFC 8701)</a>.</p>
       <p class="narrow">“Copied” means the value survives, not its position: all 17 interior
         extensions are shuffled. Each extension's two-byte type and two-byte body length are
         serialized again. Lengths inside untouched payloads are copied; SNI and ECH builders
@@ -114,6 +119,11 @@
       <div id="sample-fields"></div>
       <noscript><p>Enable JavaScript to read the byte-derived walkthrough. The general rewrite reference below remains available without it.</p></noscript>
       <h3>GREASE is several independent slots, not one replacement</h3>
+      <p class="narrow"><strong>What is GREASE?</strong> “Generate Random Extensions And Sustain
+        Extensibility” means regularly sending reserved, deliberately unsupported values so
+        servers and middleboxes do not become intolerant of new ones. Think of it as exercising
+        the “ignore unfamiliar offers” path. It is not encryption or padding, and a server must
+        not select a GREASE value as a real negotiated feature.</p>
       <p class="narrow">The captured cipher <code>4a4a</code>, leading extension <code>baba</code>,
         trailing extension <code>2a2a</code>, group <code>6a6a</code>, and version <code>1a1a</code>
         are redrawn from <code>0a0a, 1a1a, …, fafa</code>. The group draw is reused for the
@@ -122,6 +132,10 @@
         first stays empty, the last stays <code>00</code>. This sample has no GREASE signature ID.
         ECH GREASE is a separate mechanism: <code>fe0d</code> stays fixed while its body is rebuilt.</p>
       <h3>What gets added after these 1,827 bytes are transformed?</h3>
+      <p class="narrow"><strong>What does pre_shared_key do?</strong> In real TLS 1.3 it identifies
+        a previously shared secret, commonly through a resumption ticket. A binder proves
+        possession of that secret and binds the offer to the ClientHello. Twiddle borrows this
+        structure for its own ticket authentication; it does not resume a genuine browser TLS session.</p>
       <p class="narrow"><strong>Resumption:</strong> append extension <code>0029</code> after the
         trailing GREASE. For ticket length <code>T</code> and binder length <code>B</code>, its body is:
         two-byte identities length <code>T + 6</code>; two-byte identity length <code>T</code>;

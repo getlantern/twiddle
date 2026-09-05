@@ -62,6 +62,35 @@ const SAMPLE_PARTS = {
   1822: [[1, "trailing GREASE payload", "0x00.", "Copied, not rerandomized. This is separate from the zeroed GREASE key-share byte."]]
 };
 
+const FIELD_PURPOSE = {
+  "record header": "Frames a TLS record on the byte stream: identifies its content type and tells the receiver how many bytes to read. A record is a container, distinct from the handshake message inside it.",
+  "handshake header": "Identifies this handshake message as a ClientHello and gives its body length. The ClientHello opens negotiation by advertising the client's capabilities.",
+  "legacy_version": "A compatibility marker for older TLS parsers. In TLS 1.3 it remains 0x0303; supported_versions carries the actual version offer.",
+  "random": "Fresh client randomness distinguishes handshakes. In real TLS 1.3 it is covered by the handshake transcript, binding the exchange to this opening; it is not a secret or a public key.",
+  "legacy_session_id": "Originally identified sessions for older TLS resumption. TLS 1.3 compatibility mode uses a nonempty value, echoed by the server, to look familiar to middleboxes; TLS 1.3 resumption itself uses pre_shared_key.",
+  "cipher_suites": "Lists cryptographic suites the client supports. TLS 1.3 suites select authenticated encryption and a key-schedule hash; older suites also encode key-exchange and authentication choices. GREASE entries are placeholders, not usable suites.",
+  "compression_methods": "The legacy TLS record-compression offer. TLS 1.3 permits only null compression; this is separate from certificate compression below.",
+  "extensions length": "Delimits the entire extension block. Each extension then has its own type and length, allowing a parser to skip extensions it does not understand.",
+  "GREASE": "Generate Random Extensions And Sustain Extensibility: deliberately advertise reserved, unsupported values so servers and middleboxes keep tolerating unfamiliar values. This prevents implementations from accepting only today's known choices. GREASE is not an encryption algorithm, secret channel, or padding scheme; its values must not be negotiated as real features.",
+  "supported_groups": "Advertises supported key-exchange groups, such as X25519, elliptic curves, or a hybrid post-quantum group. This is the capability list; key_share supplies actual public values for some of those groups.",
+  "application_settings": "Application-Layer Protocol Settings (ALPS) allows application settings to be exchanged during the TLS handshake for a selected application protocol. This offer names h2; it is distinct from ALPN, which selects the protocol itself.",
+  "signed_certificate_timestamp": "Requests Certificate Transparency evidence from the server: signed promises by logs to record its certificate. The empty ClientHello extension is a request, not a missing timestamp payload.",
+  "psk_key_exchange_modes": "Says how the client can use a pre-shared key: alone or combined with fresh Diffie–Hellman key exchange. This sample offers psk_dhe_ke, which combines PSK authentication with fresh key agreement.",
+  "encrypted_client_hello": "Real Encrypted ClientHello (ECH) encrypts an inner ClientHello to protect sensitive fields such as the true server name, while leaving an outer hello visible. This sample uses GREASE ECH: a plausible dummy offer, not an encrypted inner hello. Twiddle rebuilds that dummy body and optionally uses it to carry its own ticket.",
+  "compress_certificate": "Advertises algorithms the client can use to decompress the server's certificate message, reducing handshake bandwidth. This sample offers Brotli. It does not enable compression of application data.",
+  "ec_point_formats": "A legacy elliptic-curve capability indicating how curve points may be encoded. It matters to older EC TLS handshakes; TLS 1.3 key-share encodings are defined by their groups instead.",
+  "session_ticket": "The legacy session-ticket resumption mechanism. An empty offer signals ticket support without presenting an existing ticket. TLS 1.3 uses pre_shared_key instead; this is not Twiddle's authentication-ticket carrier.",
+  "key_share": "Carries public key-exchange material so a server can establish a shared secret without first requesting a key. The sample includes a GREASE placeholder, a hybrid X25519/ML-KEM share, and standalone X25519. Twiddle uses only the final standalone X25519 private key for its actual agreement.",
+  "status_request": "Requests certificate-status stapling: the server can send an OCSP response about certificate revocation with its handshake, avoiding a separate client query to the certificate authority.",
+  "supported_versions": "Advertises the TLS versions the client actually supports. This supersedes legacy_version for TLS 1.3 negotiation; the GREASE entry tests tolerance of unknown version IDs.",
+  "signature_algorithms": "Advertises signature schemes the client can verify, constraining server authentication choices in a real TLS handshake. These are signature capabilities, not key-exchange groups or record-encryption ciphers.",
+  "extended_master_secret": "An older-TLS security extension that binds the master secret to the handshake transcript, preventing session-splicing attacks. TLS 1.3 builds transcript binding into its key schedule and does not negotiate this extension.",
+  "server_padding": "A historical BoringSSL extension requesting extra server-side handshake padding to alter observable response sizes. It is not client-side padding and does not absorb changes to the ClientHello's length.",
+  "renegotiation_info": "Signals secure renegotiation support in older TLS and binds later renegotiations to the existing connection. Its empty vector is normal for the initial handshake. TLS 1.3 does not support renegotiation.",
+  "server_name": "Server Name Indication (SNI) tells the server which hostname the client wants, allowing multiple sites and certificates to share an IP address. Ordinary plaintext SNI is visible to observers; Twiddle supplies its cover hostname here.",
+  "ALPN": "Application-Layer Protocol Negotiation advertises protocols the client can speak over TLS so the server can select one, such as HTTP/2 (h2) or HTTP/1.1. It selects an application protocol, not a cipher suite."
+};
+
 const sampleFields = document.getElementById("sample-fields");
 DATA.spans.forEach(span => {
   const parts = SAMPLE_PARTS[span.off].map(part => [...part]);
@@ -79,8 +108,13 @@ DATA.spans.forEach(span => {
   const summary = document.createElement("summary");
   summary.textContent = `${span.off}–${span.off + span.len - 1} · ${span.name}${extension ? " · 0x" + type : ""} · ${span.len} B`;
   details.appendChild(summary);
+  const purpose = document.createElement("p");
+  purpose.className = "field-purpose";
+  if (!FIELD_PURPOSE[span.name]) throw new Error("Missing field purpose: " + span.name);
+  purpose.textContent = "What it does: " + FIELD_PURPOSE[span.name];
+  details.appendChild(purpose);
   const note = document.createElement("p");
-  note.textContent = span.note;
+  note.textContent = "In Twiddle: " + span.note;
   if (extension) note.textContent += span.off === 114 ? " Remains first." : span.off === 1822 ? " Remains last among these 19; PSK follows it on resumption." : " This interior extension moves when shuffled.";
   if (extension && span.len === 4) note.textContent += " Empty body: there are no nested payload fields.";
   details.appendChild(note);
