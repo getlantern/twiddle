@@ -108,10 +108,18 @@ func Transcript(clientHello, serverHello, changeCipherSpec []byte) []byte {
 // that produced them.
 //
 // transcript must be Transcript(ClientHello, ServerHello, ChangeCipherSpec)
-// over the records as they went on the wire. Passing nil derives keys bound to
-// nothing, which is precisely what the ServerHello tampering exploited; it is
-// accepted only so tests can construct matched pairs without a handshake.
+// over the records as they went on the wire, and an empty one is REFUSED.
+//
+// Refusing it matters for the same reason Transcript has fixed arity: an
+// unbound derivation still compiles and still produces working keys, so a call
+// site that lost its transcript would keep passing tests while silently
+// reinstating the tampering this exists to stop. There is no legitimate unbound
+// caller -- tests that only need a matched key pair supply a fixed transcript
+// of their own -- so the case is removed rather than documented.
 func DeriveSession(psk, shared []byte, suite uint16, transcript []byte) (*Session, error) {
+	if len(transcript) == 0 {
+		return nil, errors.New("twiddle: empty transcript; keys must be bound to the opening")
+	}
 	var keyLen int
 	switch suite {
 	case TLS_AES_128_GCM_SHA256:

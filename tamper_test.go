@@ -158,3 +158,33 @@ func TestChangeCipherSpecTamperingBreaksTheHandshake(t *testing.T) {
 		t.Error("the client completed a handshake whose ChangeCipherSpec was altered in flight")
 	}
 }
+
+// An unbound derivation must not be possible at all, not merely discouraged.
+//
+// Fixed-arity Transcript stops a caller dropping one record; this stops a
+// caller dropping the whole transcript, which is the same silent weakening by a
+// shorter route. Both compile, both produce working keys, and neither fails a
+// test that only checks bytes move -- which is why the check has to be in
+// DeriveSession rather than in a comment.
+func TestDeriveSessionRefusesAnUnboundTranscript(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		transcript []byte
+	}{
+		{"nil", nil},
+		{"empty", []byte{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := DeriveSession(make([]byte, 32), make([]byte, 32),
+				TLS_AES_128_GCM_SHA256, tc.transcript)
+			if err == nil {
+				t.Error("DeriveSession produced keys bound to nothing; ServerHello tampering would go undetected")
+			}
+		})
+	}
+	// And the bound form still works, or the check would be indiscriminate.
+	if _, err := DeriveSession(make([]byte, 32), make([]byte, 32),
+		TLS_AES_128_GCM_SHA256, testTranscript()); err != nil {
+		t.Errorf("a bound derivation was refused: %v", err)
+	}
+}
