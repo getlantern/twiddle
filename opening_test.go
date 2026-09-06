@@ -351,7 +351,7 @@ func TestCloseSendsCloseNotify(t *testing.T) {
 	for _, host := range MeasuredCovers() {
 		t.Run(host, func(t *testing.T) {
 			cover := mustCover(t, host)
-			sess, err := DeriveSession(make([]byte, 32), make([]byte, 32), cover.CipherSuite)
+			sess, err := DeriveSession(make([]byte, 32), make([]byte, 32), cover.CipherSuite, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -406,7 +406,7 @@ func serverHelloExtOrder(t *testing.T, sh []byte) []uint16 {
 // would parse the first of them as a ticket instead of failing.
 func TestReadTicketsRejectsNonHandshakeRecords(t *testing.T) {
 	cover := mustCover(t, "www.microsoft.com")
-	sess, err := DeriveSession(make([]byte, 32), make([]byte, 32), cover.CipherSuite)
+	sess, err := DeriveSession(make([]byte, 32), make([]byte, 32), cover.CipherSuite, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,7 +414,7 @@ func TestReadTicketsRejectsNonHandshakeRecords(t *testing.T) {
 	defer server.Close()
 	defer client.Close()
 
-	wSess, err := DeriveSession(make([]byte, 32), make([]byte, 32), cover.CipherSuite)
+	wSess, err := DeriveSession(make([]byte, 32), make([]byte, 32), cover.CipherSuite, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1100,7 +1100,7 @@ func TestClientReportsANilConnectionRatherThanPanicking(t *testing.T) {
 func TestReadTicketsRejectsALooseButInexactBody(t *testing.T) {
 	cover := mustCover(t, "www.microsoft.com")
 	newSess := func() *Session {
-		sess, err := DeriveSession(make([]byte, 32), make([]byte, 32), cover.CipherSuite)
+		sess, err := DeriveSession(make([]byte, 32), make([]byte, 32), cover.CipherSuite, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1162,7 +1162,7 @@ func TestReadTicketsRejectsALooseButInexactBody(t *testing.T) {
 func TestReadTicketsRejectsAnOversizedCompanionBody(t *testing.T) {
 	cover := mustCover(t, "www.microsoft.com")
 	newSess := func() *Session {
-		sess, err := DeriveSession(make([]byte, 32), make([]byte, 32), cover.CipherSuite)
+		sess, err := DeriveSession(make([]byte, 32), make([]byte, 32), cover.CipherSuite, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

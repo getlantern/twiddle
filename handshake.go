@@ -187,7 +187,8 @@ func Client(raw net.Conn, cfg ClientConfig) (*Conn, *Credential, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	if _, err := readRecord(raw); err != nil { // ChangeCipherSpec
+	ccs, err := readRecord(raw) // ChangeCipherSpec
+	if err != nil {
 		return nil, nil, err
 	}
 
@@ -195,7 +196,11 @@ func Client(raw net.Conn, cfg ClientConfig) (*Conn, *Credential, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	sess, err := DeriveSession(cfg.Credential.PSK[:], shared, cfg.Cover.CipherSuite)
+	// Binds the opening to the keys. wire is what we sent and sh is what came
+	// back, so a ServerHello altered in flight yields different keys here than
+	// the server derived, and the first encrypted record fails to decrypt.
+	sess, err := DeriveSession(cfg.Credential.PSK[:], shared, cfg.Cover.CipherSuite,
+		Transcript(wire, sh, ccs))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -316,7 +321,8 @@ func Server(raw net.Conn, cfg ServerConfig) (*Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	sess, err := DeriveSession(res.PSK[:], shared, cfg.Cover.CipherSuite)
+	sess, err := DeriveSession(res.PSK[:], shared, cfg.Cover.CipherSuite,
+		Transcript(rec, sh, ChangeCipherSpec()))
 	if err != nil {
 		return nil, err
 	}

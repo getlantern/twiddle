@@ -68,7 +68,7 @@ func (c *replayConn) Close() error               { return nil }
 
 func testSession(t *testing.T) *Session {
 	t.Helper()
-	s, err := DeriveSession(make([]byte, 32), make([]byte, 32), TLS_AES_128_GCM_SHA256)
+	s, err := DeriveSession(make([]byte, 32), make([]byte, 32), TLS_AES_128_GCM_SHA256, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

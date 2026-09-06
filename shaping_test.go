@@ -197,7 +197,7 @@ func TestCoalescingMergesConcurrentWrites(t *testing.T) {
 	a, b := net.Pipe()
 	defer a.Close()
 	defer b.Close()
-	sess, err := DeriveSession(make([]byte, 32), make([]byte, 32), TLS_AES_128_GCM_SHA256)
+	sess, err := DeriveSession(make([]byte, 32), make([]byte, 32), TLS_AES_128_GCM_SHA256, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

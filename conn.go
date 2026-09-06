@@ -65,7 +65,53 @@ type Session struct {
 // DeriveSession builds traffic keys from the pre-shared key and the ECDH shared
 // secret. Authentication comes from the psk and forward secrecy from the DH --
 // the same division of labour as TLS 1.3 psk_dhe_ke.
-func DeriveSession(psk, shared []byte, suite uint16) (*Session, error) {
+// Transcript binds the opening to the keys, exactly as TLS 1.3's transcript
+// hash does, and it is the reason a tampered ServerHello is detected at all.
+//
+// Without it the client checked almost nothing about the ServerHello: it pulled
+// the X25519 half out of the key_share, did the ECDH, and derived keys from the
+// psk and its OWN configured cipher suite. So an on-path attacker could flip a
+// byte in legacy_session_id_echo, cipher_suite, legacy_version,
+// compression_method, ServerHello.random or the ML-KEM half of the share and
+// the client completed the handshake regardless -- while a genuine TLS 1.3
+// client aborts, because RFC 8446 4.1.3 requires the session_id echo to match
+// and the server Finished MACs the whole transcript.
+//
+// That gap was an ACTIVE DISTINGUISHER, and a cheap one: flip one byte in a
+// ServerHello and watch whether the connection survives. Real TLS dies, we did
+// not. It needs no traffic analysis, works on the first connection, and the
+// only cost to a censor is breaking the connection it probes. Six of seven
+// mutated fields were accepted before this; only the X25519 half was caught,
+// and only incidentally, because it breaks the ECDH.
+//
+// Feeding the transcript into the derivation closes it the way TLS does rather
+// than by adding field-by-field checks: ANY difference between what the server
+// sent and what the client received produces different keys, so the first
+// encrypted record fails to decrypt. Under theater that is the right analogue
+// of an alert, since this transport never sends one.
+// It takes the opening records in order -- ClientHello, ServerHello,
+// ChangeCipherSpec -- and is variadic so nothing that later joins the opening
+// can be left out by forgetting to widen a signature.
+func Transcript(records ...[]byte) []byte {
+	n := 0
+	for _, r := range records {
+		n += len(r)
+	}
+	t := make([]byte, 0, n)
+	for _, r := range records {
+		t = append(t, r...)
+	}
+	return t
+}
+
+// DeriveSession builds traffic keys from the pre-shared key, the ECDH shared
+// secret, and the opening transcript.
+//
+// transcript must be the ClientHello and ServerHello RECORDS as they went on
+// the wire, from Transcript. Passing nil derives keys bound to nothing, which
+// is what the tampering above exploited; it is accepted only so tests can
+// construct matched pairs without running a handshake.
+func DeriveSession(psk, shared []byte, suite uint16, transcript []byte) (*Session, error) {
 	var keyLen int
 	switch suite {
 	case TLS_AES_128_GCM_SHA256:
@@ -86,12 +132,17 @@ func DeriveSession(psk, shared []byte, suite uint16) (*Session, error) {
 		// psk is the salt and the ECDH secret the input keying material, so both
 		// must be present to derive traffic keys: authentication from the
 		// pre-shared key, forward secrecy from the Diffie-Hellman.
+		// The transcript hash rides in the HKDF info alongside the label,
+		// which is where TLS 1.3 puts it too: Derive-Secret binds each secret
+		// to the handshake messages that produced it.
 		var out []byte
 		var err error
 		if suite == TLS_AES_256_GCM_SHA384 {
-			out, err = hkdf.Key(sha512.New384, shared, psk, d.label, keyLen+12)
+			sum := sha512.Sum384(transcript)
+			out, err = hkdf.Key(sha512.New384, shared, psk, d.label+string(sum[:]), keyLen+12)
 		} else {
-			out, err = hkdf.Key(sha256.New, shared, psk, d.label, keyLen+12)
+			sum := sha256.Sum256(transcript)
+			out, err = hkdf.Key(sha256.New, shared, psk, d.label+string(sum[:]), keyLen+12)
 		}
 		if err != nil {
 			return nil, err
