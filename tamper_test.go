@@ -130,7 +130,6 @@ func tamperedOpening(t *testing.T, record, offset int) error {
 			MaxAge: time.Hour, Replay: NewReplayCache(16, time.Hour),
 		}); err == nil {
 			sc.Write([]byte("payload"))
-			time.Sleep(300 * time.Millisecond)
 		}
 	}()
 

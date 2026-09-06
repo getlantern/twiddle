@@ -62,11 +62,9 @@ type Session struct {
 	Suite          uint16
 }
 
-// DeriveSession builds traffic keys from the pre-shared key and the ECDH shared
-// secret. Authentication comes from the psk and forward secrecy from the DH --
-// the same division of labour as TLS 1.3 psk_dhe_ke.
-// Transcript binds the opening to the keys, exactly as TLS 1.3's transcript
-// hash does, and it is the reason a tampered ServerHello is detected at all.
+// Transcript is the opening as it went on the wire, in order, and binding it to
+// the traffic keys is what makes a tampered ServerHello detectable at all --
+// exactly as TLS 1.3's transcript hash does.
 //
 // Without it the client checked almost nothing about the ServerHello: it pulled
 // the X25519 half out of the key_share, did the ECDH, and derived keys from the
@@ -89,28 +87,30 @@ type Session struct {
 // sent and what the client received produces different keys, so the first
 // encrypted record fails to decrypt. Under theater that is the right analogue
 // of an alert, since this transport never sends one.
-// It takes the opening records in order -- ClientHello, ServerHello,
-// ChangeCipherSpec -- and is variadic so nothing that later joins the opening
-// can be left out by forgetting to widen a signature.
-func Transcript(records ...[]byte) []byte {
-	n := 0
-	for _, r := range records {
-		n += len(r)
-	}
-	t := make([]byte, 0, n)
-	for _, r := range records {
-		t = append(t, r...)
-	}
-	return t
+// The arity is FIXED at the three opening records rather than variadic. The
+// first version was variadic, reasoning that a record joining the opening later
+// could then be added without widening a signature -- which had it backwards. A
+// variadic call site can silently drop a record and still compile, weakening the
+// binding with nothing to notice, and silent weakening is the exact class of bug
+// this change exists to remove. Widening a signature is a compile error at every
+// call site, which is the direction that gets looked at.
+func Transcript(clientHello, serverHello, changeCipherSpec []byte) []byte {
+	t := make([]byte, 0, len(clientHello)+len(serverHello)+len(changeCipherSpec))
+	t = append(t, clientHello...)
+	t = append(t, serverHello...)
+	return append(t, changeCipherSpec...)
 }
 
 // DeriveSession builds traffic keys from the pre-shared key, the ECDH shared
-// secret, and the opening transcript.
+// secret, and the opening transcript. Authentication comes from the psk and
+// forward secrecy from the DH -- the same division of labour as TLS 1.3
+// psk_dhe_ke -- while the transcript is what binds those keys to the opening
+// that produced them.
 //
-// transcript must be the ClientHello and ServerHello RECORDS as they went on
-// the wire, from Transcript. Passing nil derives keys bound to nothing, which
-// is what the tampering above exploited; it is accepted only so tests can
-// construct matched pairs without running a handshake.
+// transcript must be Transcript(ClientHello, ServerHello, ChangeCipherSpec)
+// over the records as they went on the wire. Passing nil derives keys bound to
+// nothing, which is precisely what the ServerHello tampering exploited; it is
+// accepted only so tests can construct matched pairs without a handshake.
 func DeriveSession(psk, shared []byte, suite uint16, transcript []byte) (*Session, error) {
 	var keyLen int
 	switch suite {
