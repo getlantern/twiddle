@@ -62,16 +62,59 @@ type Session struct {
 	Suite          uint16
 }
 
-// DeriveSession builds traffic keys from the pre-shared key and the ECDH shared
-// secret. Authentication comes from the psk and forward secrecy from the DH --
-// the same division of labour as TLS 1.3 psk_dhe_ke.
-func DeriveSession(psk, shared []byte, suite uint16) (*Session, error) {
+// Transcript binds the opening record payloads in wire order, including the
+// handshake message headers. It excludes the five-byte plaintext record
+// headers: TLS 1.3 ignores legacy_record_version (RFC 8446 section 5.1), so
+// binding that field would let an observer distinguish us by changing it.
+//
+// ServerHello fields remain bound, so changing its random, session_id echo,
+// cipher suite or key share causes the first encrypted record to fail. The
+// ChangeCipherSpec payload remains bound too, so altering its fixed value is
+// rejected. Unlike TLS's handshake transcript, this includes that CCS payload.
+//
+// Each argument must be a complete opening record with a non-empty payload.
+// A missing payload returns nil, which DeriveSession refuses, rather than
+// silently deriving keys from an incomplete transcript.
+func Transcript(clientHello, serverHello, changeCipherSpec []byte) []byte {
+	if len(clientHello) <= recordHeaderLen || len(serverHello) <= recordHeaderLen || len(changeCipherSpec) <= recordHeaderLen {
+		return nil
+	}
+	t := make([]byte, 0, len(clientHello)+len(serverHello)+len(changeCipherSpec)-3*recordHeaderLen)
+	t = append(t, clientHello[recordHeaderLen:]...)
+	t = append(t, serverHello[recordHeaderLen:]...)
+	return append(t, changeCipherSpec[recordHeaderLen:]...)
+}
+
+// DeriveSession builds traffic keys from the pre-shared key, the ECDH shared
+// secret, and the opening transcript. Authentication comes from the psk and
+// forward secrecy from the DH -- the same division of labour as TLS 1.3
+// psk_dhe_ke -- while the transcript is what binds those keys to the opening
+// that produced them.
+//
+// transcript must be Transcript(ClientHello, ServerHello, ChangeCipherSpec)
+// over the opening record payloads, and an empty one is REFUSED.
+//
+// Refusing it matters for the same reason Transcript has fixed arity: an
+// unbound derivation still compiles and still produces working keys, so a call
+// site that lost its transcript would keep passing tests while silently
+// reinstating the tampering this exists to stop. There is no legitimate unbound
+// caller -- tests that only need a matched key pair supply a fixed transcript
+// of their own -- so the case is removed rather than documented.
+func DeriveSession(psk, shared []byte, suite uint16, transcript []byte) (*Session, error) {
+	if len(transcript) == 0 {
+		return nil, errors.New("twiddle: empty transcript; keys must be bound to the opening")
+	}
 	var keyLen int
+	var transcriptHash string
 	switch suite {
 	case TLS_AES_128_GCM_SHA256:
 		keyLen = 16
+		sum := sha256.Sum256(transcript)
+		transcriptHash = string(sum[:])
 	case TLS_AES_256_GCM_SHA384:
 		keyLen = 32
+		sum := sha512.Sum384(transcript)
+		transcriptHash = string(sum[:])
 	default:
 		return nil, fmt.Errorf("twiddle: unsupported cipher suite %#04x", suite)
 	}
@@ -86,12 +129,15 @@ func DeriveSession(psk, shared []byte, suite uint16) (*Session, error) {
 		// psk is the salt and the ECDH secret the input keying material, so both
 		// must be present to derive traffic keys: authentication from the
 		// pre-shared key, forward secrecy from the Diffie-Hellman.
+		// The transcript hash rides in the HKDF info alongside the label,
+		// which is where TLS 1.3 puts it too: Derive-Secret binds each secret
+		// to the handshake messages that produced it.
 		var out []byte
 		var err error
 		if suite == TLS_AES_256_GCM_SHA384 {
-			out, err = hkdf.Key(sha512.New384, shared, psk, d.label, keyLen+12)
+			out, err = hkdf.Key(sha512.New384, shared, psk, d.label+transcriptHash, keyLen+12)
 		} else {
-			out, err = hkdf.Key(sha256.New, shared, psk, d.label, keyLen+12)
+			out, err = hkdf.Key(sha256.New, shared, psk, d.label+transcriptHash, keyLen+12)
 		}
 		if err != nil {
 			return nil, err
