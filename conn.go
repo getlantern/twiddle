@@ -105,11 +105,16 @@ func DeriveSession(psk, shared []byte, suite uint16, transcript []byte) (*Sessio
 		return nil, errors.New("twiddle: empty transcript; keys must be bound to the opening")
 	}
 	var keyLen int
+	var transcriptHash string
 	switch suite {
 	case TLS_AES_128_GCM_SHA256:
 		keyLen = 16
+		sum := sha256.Sum256(transcript)
+		transcriptHash = string(sum[:])
 	case TLS_AES_256_GCM_SHA384:
 		keyLen = 32
+		sum := sha512.Sum384(transcript)
+		transcriptHash = string(sum[:])
 	default:
 		return nil, fmt.Errorf("twiddle: unsupported cipher suite %#04x", suite)
 	}
@@ -130,11 +135,9 @@ func DeriveSession(psk, shared []byte, suite uint16, transcript []byte) (*Sessio
 		var out []byte
 		var err error
 		if suite == TLS_AES_256_GCM_SHA384 {
-			sum := sha512.Sum384(transcript)
-			out, err = hkdf.Key(sha512.New384, shared, psk, d.label+string(sum[:]), keyLen+12)
+			out, err = hkdf.Key(sha512.New384, shared, psk, d.label+transcriptHash, keyLen+12)
 		} else {
-			sum := sha256.Sum256(transcript)
-			out, err = hkdf.Key(sha256.New, shared, psk, d.label+string(sum[:]), keyLen+12)
+			out, err = hkdf.Key(sha256.New, shared, psk, d.label+transcriptHash, keyLen+12)
 		}
 		if err != nil {
 			return nil, err

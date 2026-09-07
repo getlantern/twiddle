@@ -158,6 +158,11 @@ Recently closed, both found by measuring rather than reading:
 The sing-box adapter for both — inbound, outbound and options — is in `lantern-box` on
 `fisk/twiddle-transport`.
 
+Opening transcripts now contribute to traffic-key derivation. Before deploying this version,
+release a `lantern-box` build that pins this derivation and upgrade both client and server together.
+Peers using the previous derivation cannot decrypt each other's traffic; mixed-version deployment
+is unsupported. An older adapter release is not compatible merely because it supports Twiddle.
+
 This repo is **public**. It went public when `lantern-box/protocol/twiddle` began importing it: a public
 module importing a private one forces credentials into every build, and CI proved the point by failing to
 fetch it. The full design, measurements and rollout plan live in `getlantern/discovery-engine`, which is
