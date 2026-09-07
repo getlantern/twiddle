@@ -62,43 +62,27 @@ type Session struct {
 	Suite          uint16
 }
 
-// Transcript is the opening as it went on the wire, in order, and binding it to
-// the traffic keys is what makes a tampered ServerHello detectable at all --
-// exactly as TLS 1.3's transcript hash does.
+// Transcript binds the opening record payloads in wire order, including the
+// handshake message headers. It excludes the five-byte plaintext record
+// headers: TLS 1.3 ignores legacy_record_version (RFC 8446 section 5.1), so
+// binding that field would let an observer distinguish us by changing it.
 //
-// Without it the client checked almost nothing about the ServerHello: it pulled
-// the X25519 half out of the key_share, did the ECDH, and derived keys from the
-// psk and its OWN configured cipher suite. So an on-path attacker could flip a
-// byte in legacy_session_id_echo, cipher_suite, legacy_version,
-// compression_method, ServerHello.random or the ML-KEM half of the share and
-// the client completed the handshake regardless -- while a genuine TLS 1.3
-// client aborts, because RFC 8446 4.1.3 requires the session_id echo to match
-// and the server Finished MACs the whole transcript.
+// ServerHello fields remain bound, so changing its random, session_id echo,
+// cipher suite or key share causes the first encrypted record to fail. The
+// ChangeCipherSpec payload remains bound too, so altering its fixed value is
+// rejected. Unlike TLS's handshake transcript, this includes that CCS payload.
 //
-// That gap was an ACTIVE DISTINGUISHER, and a cheap one: flip one byte in a
-// ServerHello and watch whether the connection survives. Real TLS dies, we did
-// not. It needs no traffic analysis, works on the first connection, and the
-// only cost to a censor is breaking the connection it probes. Six of seven
-// mutated fields were accepted before this; only the X25519 half was caught,
-// and only incidentally, because it breaks the ECDH.
-//
-// Feeding the transcript into the derivation closes it the way TLS does rather
-// than by adding field-by-field checks: ANY difference between what the server
-// sent and what the client received produces different keys, so the first
-// encrypted record fails to decrypt. Under theater that is the right analogue
-// of an alert, since this transport never sends one.
-// The arity is FIXED at the three opening records rather than variadic. The
-// first version was variadic, reasoning that a record joining the opening later
-// could then be added without widening a signature -- which had it backwards. A
-// variadic call site can silently drop a record and still compile, weakening the
-// binding with nothing to notice, and silent weakening is the exact class of bug
-// this change exists to remove. Widening a signature is a compile error at every
-// call site, which is the direction that gets looked at.
+// Each argument must be a complete opening record with a non-empty payload.
+// A missing payload returns nil, which DeriveSession refuses, rather than
+// silently deriving keys from an incomplete transcript.
 func Transcript(clientHello, serverHello, changeCipherSpec []byte) []byte {
-	t := make([]byte, 0, len(clientHello)+len(serverHello)+len(changeCipherSpec))
-	t = append(t, clientHello...)
-	t = append(t, serverHello...)
-	return append(t, changeCipherSpec...)
+	if len(clientHello) <= recordHeaderLen || len(serverHello) <= recordHeaderLen || len(changeCipherSpec) <= recordHeaderLen {
+		return nil
+	}
+	t := make([]byte, 0, len(clientHello)+len(serverHello)+len(changeCipherSpec)-3*recordHeaderLen)
+	t = append(t, clientHello[recordHeaderLen:]...)
+	t = append(t, serverHello[recordHeaderLen:]...)
+	return append(t, changeCipherSpec[recordHeaderLen:]...)
 }
 
 // DeriveSession builds traffic keys from the pre-shared key, the ECDH shared
@@ -108,7 +92,7 @@ func Transcript(clientHello, serverHello, changeCipherSpec []byte) []byte {
 // that produced them.
 //
 // transcript must be Transcript(ClientHello, ServerHello, ChangeCipherSpec)
-// over the records as they went on the wire, and an empty one is REFUSED.
+// over the opening record payloads, and an empty one is REFUSED.
 //
 // Refusing it matters for the same reason Transcript has fixed arity: an
 // unbound derivation still compiles and still produces working keys, so a call

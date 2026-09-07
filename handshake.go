@@ -191,6 +191,9 @@ func Client(raw net.Conn, cfg ClientConfig) (*Conn, *Credential, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	if len(ccs) != recordHeaderLen+1 || ccs[0] != 0x14 || ccs[recordHeaderLen] != 0x01 {
+		return nil, nil, errMalformed
+	}
 
 	shared, err := eph.ECDH(serverEph)
 	if err != nil {

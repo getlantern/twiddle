@@ -103,6 +103,14 @@ func TestUntamperedOpeningThroughTheProxySucceeds(t *testing.T) {
 	}
 }
 
+// RFC 8446 section 5.1 requires ignoring legacy_record_version. Unlike the
+// ServerHello's legacy_version field, this header is not authenticated by TLS.
+func TestServerHelloRecordVersionMutationSucceeds(t *testing.T) {
+	if err := tamperedOpening(t, 0, 2); err != nil {
+		t.Fatalf("changing the ServerHello record version from 0x0303 to 0x0302 broke the handshake: %v", err)
+	}
+}
+
 // tamperedOpening runs one client/server opening through the proxy and returns
 // the client's error.
 func tamperedOpening(t *testing.T, record, offset int) error {
@@ -154,8 +162,18 @@ func tamperedOpening(t *testing.T, record, offset int) error {
 // one argument, and leaving a known hole open because it is small is how the
 // ServerHello hole survived: each individual field looked unimportant.
 func TestChangeCipherSpecTamperingBreaksTheHandshake(t *testing.T) {
-	if err := tamperedOpening(t, 1, 5); err == nil {
-		t.Error("the client completed a handshake whose ChangeCipherSpec was altered in flight")
+	for _, tc := range []struct {
+		name   string
+		offset int
+	}{
+		{"record type", 0},
+		{"payload", 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tamperedOpening(t, 1, tc.offset); err == nil {
+				t.Error("the client completed a handshake whose ChangeCipherSpec was altered in flight")
+			}
+		})
 	}
 }
 
