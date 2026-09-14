@@ -105,6 +105,11 @@ var covers = map[string]CoverProfile{
 // CoverFor returns a tuned profile for known hosts or a default TLS 1.3 profile
 // for other DNS hostnames. The default is not a measurement of the named host.
 func CoverFor(host string) (CoverProfile, error) {
+	for _, c := range host {
+		if c > 127 {
+			return CoverProfile{}, fmt.Errorf("%w: %s", ErrUnknownCover, host)
+		}
+	}
 	host = strings.ToLower(host)
 	if !validCoverHost(host) {
 		return CoverProfile{}, fmt.Errorf("%w: %s", ErrUnknownCover, host)

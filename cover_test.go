@@ -227,6 +227,11 @@ func TestCoverForGenericDomains(t *testing.T) {
 			if err := p.Valid(); err != nil {
 				t.Fatal(err)
 			}
+			if p.CipherSuite != TLS_AES_128_GCM_SHA256 || p.BinderLen != 32 || p.TicketLen != 176 ||
+				p.PSKFirst || !slices.Equal(p.ResumedRemainder, []int{64}) || p.ResumedClientFlight != 149 ||
+				len(p.FullRemainder) != 0 || len(p.FullRemainderJitter) != 0 {
+				t.Fatalf("unexpected generic profile: %+v", p)
+			}
 			if slices.Contains(MeasuredCovers(), p.Host) {
 				t.Fatal("generic profile presented as measured")
 			}
@@ -242,7 +247,7 @@ func TestCoverForGenericDomains(t *testing.T) {
 }
 
 func TestCoverForRejectsInvalidHostnames(t *testing.T) {
-	for _, host := range []string{"", "localhost", "intranet", "1.2.3", "example.123", "example.com.", " example.com", "example.com ", "https://example.com", "example.com:443", "127.0.0.1", "::1", "*.example.com", "bad_name.example", "a..example", "-a.example", "a-.example", strings.Repeat("a", 64) + ".example", strings.Repeat("a.", 127) + "a"} {
+	for _, host := range []string{"", "K.example", "bücher.example", "example.K", "localhost", "intranet", "1.2.3", "example.123", "example.com.", " example.com", "example.com ", "https://example.com", "example.com:443", "127.0.0.1", "::1", "*.example.com", "bad_name.example", "a..example", "-a.example", "a-.example", strings.Repeat("a", 64) + ".example", strings.Repeat("a.", 127) + "a"} {
 		if _, err := CoverFor(host); !errors.Is(err, ErrUnknownCover) {
 			t.Errorf("%q: expected invalid cover, got %v", host, err)
 		}
