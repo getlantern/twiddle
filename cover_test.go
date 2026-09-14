@@ -259,6 +259,7 @@ func TestAdoptMatchesCanonicalCoverHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	p.Host = "GitHub.com"
 	for _, tc := range []struct {
 		host string
 		ok   bool
@@ -277,8 +278,32 @@ func TestAdoptMatchesCanonicalCoverHost(t *testing.T) {
 			if (err == nil) != tc.ok {
 				t.Fatalf("Adopt(%q) error = %v, want success %v", tc.host, err, tc.ok)
 			}
-			if got.Host != "github.com" {
+			if got.Host != p.Host {
 				t.Fatalf("adoption changed canonical cover to %q", got.Host)
+			}
+		})
+	}
+}
+
+func TestAdoptRejectsIncompatibleResumedShape(t *testing.T) {
+	for _, host := range []string{"unmeasured.example", "www.cloudflare.com"} {
+		t.Run(host, func(t *testing.T) {
+			p, err := CoverFor(host)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := p.Adopt(ProbeResult{
+				Host: host, ServerHello: ServerHelloResumedLen,
+				Remainder: []int{65}, OpeningBurst: p.ResumedOpeningBurst() + 1,
+			})
+			if err == nil {
+				t.Fatal("adopted a resumed shape incompatible with handshake validation")
+			}
+			if err := got.Valid(); err != nil {
+				t.Fatalf("rejection did not preserve usable profile: %v", err)
+			}
+			if !slices.Equal(got.ResumedRemainder, p.ResumedRemainder) {
+				t.Fatal("rejection changed the profile")
 			}
 		})
 	}

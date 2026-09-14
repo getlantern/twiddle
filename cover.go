@@ -397,10 +397,12 @@ const (
 // against it. The full remainder is the certificate: there is no constant to
 // compare to -- it moves run to run and on every rotation -- so it is checked
 // structurally instead, on the ServerHello length, the record count and a
-// plausible size range.
+// plausible size range. Resumed results must also preserve the fixed profile
+// required by Client and Server validation.
 func (p CoverProfile) Adopt(res ProbeResult) (CoverProfile, error) {
 	probeCover, err := CoverFor(res.Host)
-	if err != nil || probeCover.Host != p.Host {
+	profileCover, profileErr := CoverFor(p.Host)
+	if err != nil || profileErr != nil || probeCover.Host != profileCover.Host {
 		return p, fmt.Errorf("twiddle: probe of %s cannot update the %s profile", res.Host, p.Host)
 	}
 	if len(res.Remainder) == 0 || len(res.Remainder) > maxRemainderRecords {
@@ -443,5 +445,8 @@ func (p CoverProfile) Adopt(res ProbeResult) (CoverProfile, error) {
 	}
 	out := p
 	out.ResumedRemainder = append([]int(nil), res.Remainder...)
+	if err := out.Valid(); err != nil {
+		return p, fmt.Errorf("twiddle: resumed probe is incompatible with the cover profile: %w", err)
+	}
 	return out, nil
 }
