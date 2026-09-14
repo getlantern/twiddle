@@ -33,6 +33,29 @@ preset-staleness treadmill. This module depends on **no TLS library** for its ow
 `TestShippedPackagesImportNoTLSLibrary`, not by memory. The measurement tooling under `harvest/` does use
 `crypto/tls`, and stays there so it cannot reach a shipped binary.
 
+## Cover domains
+
+`CoverFor` accepts DNS hostnames without requiring a measured per-domain profile.
+Known hosts retain their tuned profiles; other hosts use a default TLS 1.3
+SHA-256 profile with a 176-byte ticket. This default is a consistent handshake
+shape, not a claim to reproduce that domain's server fingerprint. Full-handshake
+support still requires the existing live-probe data.
+
+All unlisted hosts share the same resumed shape: AES-128-GCM-SHA256, a
+32-byte binder, a 176-byte ticket, one 64-byte encrypted server record, a
+149-byte client flight, and `PSKFirst=false`. The sizes match the tuned
+Cloudflare profile, but the extension order differs. This combination is not
+a measured server profile; observers could cluster connections by this shared
+shape or distinguish them by comparing against the named server. For example,
+our GitHub measurement recorded 32-byte tickets; accepting `github.com` with
+the generic profile does not reproduce that measurement. Choose covers with
+these limits in mind and validate behavior in the target network.
+
+Use an SNI reachable in the target network and forward unauthenticated connections
+to that same cover service. Hostname acceptance does not check reachability.
+Clients, egress servers, and config generators must use a version with this
+support before assigning previously unsupported cover domains.
+
 ## Authentication
 
 Two paths, because the richest carrier is not present on every hello:

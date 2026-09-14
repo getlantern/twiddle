@@ -328,15 +328,7 @@ func TestServerRequiresTicketKey(t *testing.T) {
 	}
 }
 
-func TestUnknownCoverIsRejected(t *testing.T) {
-	_, err := CoverFor("unmeasured.example")
-	if err == nil {
-		t.Fatal("unknown cover was accepted")
-	}
-	_, err = CoverFor("github.com")
-	if err == nil {
-		t.Fatal("github.com ticket is too short to impersonate")
-	}
+func TestPartialCoverIsRejected(t *testing.T) {
 	cfg := ClientConfig{Pool: pool(t), Cover: CoverProfile{Host: "www.microsoft.com", BinderLen: 32}}
 	if _, _, err := Client(nil, cfg); err == nil {
 		t.Fatal("a partial microsoft profile (32-byte binder) was accepted")

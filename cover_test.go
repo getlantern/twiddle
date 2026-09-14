@@ -1,6 +1,7 @@
 package twiddle
 
 import (
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -121,10 +122,8 @@ func TestPerCoverHelpersAreCaseInsensitive(t *testing.T) {
 			t.Errorf("PSKFirstForCover(%q)=%v but (%q)=%v", upper, got, host, want)
 		}
 	}
-	// The github.com fallback is a literal compare, so it is the one that can
-	// disagree: 32 is the recorded measurement, DefaultTicketLen is not.
-	if got := TicketLenForCover("GitHub.com"); got != 32 {
-		t.Errorf("TicketLenForCover(\"GitHub.com\")=%d, want the recorded 32", got)
+	if got := TicketLenForCover("GitHub.com"); got != DefaultTicketLen {
+		t.Errorf("generic profile ticket length = %d, want %d", got, DefaultTicketLen)
 	}
 }
 
@@ -212,5 +211,100 @@ func TestAdoptCarriesTheFullRemainderJitter(t *testing.T) {
 		FullRemainderJitter: []int{0, 1},
 	}).DrawFullRemainder(); err == nil {
 		t.Error("DrawFullRemainder accepted a mismatched jitter")
+	}
+}
+
+func TestCoverForGenericDomains(t *testing.T) {
+	for _, host := range []string{"unmeasured.example", "GitHub.com", "cdn.example.net", "xn--bcher-kva.example"} {
+		t.Run(host, func(t *testing.T) {
+			p, err := CoverFor(host)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p.Host != strings.ToLower(host) {
+				t.Fatalf("wrong SNI: %s", p.Host)
+			}
+			if err := p.Valid(); err != nil {
+				t.Fatal(err)
+			}
+			if p.CipherSuite != TLS_AES_128_GCM_SHA256 || p.BinderLen != 32 || p.TicketLen != 176 ||
+				p.PSKFirst || !slices.Equal(p.ResumedRemainder, []int{64}) || p.ResumedClientFlight != 149 ||
+				len(p.FullRemainder) != 0 || len(p.FullRemainderJitter) != 0 {
+				t.Fatalf("unexpected generic profile: %+v", p)
+			}
+			if slices.Contains(MeasuredCovers(), p.Host) {
+				t.Fatal("generic profile presented as measured")
+			}
+			if p.TicketLen != TicketLenForCover(host) || p.PSKFirst != PSKFirstForCover(host) {
+				t.Fatal("profile helpers disagree")
+			}
+			p.BinderLen = 48
+			if p.Valid() == nil {
+				t.Fatal("accepted a binder incompatible with the cipher")
+			}
+		})
+	}
+}
+
+func TestCoverForRejectsInvalidHostnames(t *testing.T) {
+	for _, host := range []string{"", "K.example", "bücher.example", "example.K", "localhost", "intranet", "1.2.3", "example.123", "example.com.", " example.com", "example.com ", "https://example.com", "example.com:443", "127.0.0.1", "::1", "*.example.com", "bad_name.example", "a..example", "-a.example", "a-.example", strings.Repeat("a", 64) + ".example", strings.Repeat("a.", 127) + "a"} {
+		if _, err := CoverFor(host); !errors.Is(err, ErrUnknownCover) {
+			t.Errorf("%q: expected invalid cover, got %v", host, err)
+		}
+	}
+}
+
+func TestAdoptMatchesCanonicalCoverHost(t *testing.T) {
+	p, err := CoverFor("GitHub.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Host = "GitHub.com"
+	for _, tc := range []struct {
+		host string
+		ok   bool
+	}{
+		{host: "GitHub.com", ok: true},
+		{host: "github.com", ok: true},
+		{host: "different.example"},
+		{host: "github.com."},
+		{host: "gıthub.com"},
+	} {
+		t.Run(tc.host, func(t *testing.T) {
+			got, err := p.Adopt(ProbeResult{
+				Host: tc.host, ServerHello: ServerHelloResumedLen,
+				Remainder: []int{64}, OpeningBurst: p.ResumedOpeningBurst(),
+			})
+			if (err == nil) != tc.ok {
+				t.Fatalf("Adopt(%q) error = %v, want success %v", tc.host, err, tc.ok)
+			}
+			if got.Host != p.Host {
+				t.Fatalf("adoption changed canonical cover to %q", got.Host)
+			}
+		})
+	}
+}
+
+func TestAdoptRejectsIncompatibleResumedShape(t *testing.T) {
+	for _, host := range []string{"unmeasured.example", "www.cloudflare.com"} {
+		t.Run(host, func(t *testing.T) {
+			p, err := CoverFor(host)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := p.Adopt(ProbeResult{
+				Host: host, ServerHello: ServerHelloResumedLen,
+				Remainder: []int{65}, OpeningBurst: p.ResumedOpeningBurst() + 1,
+			})
+			if err == nil {
+				t.Fatal("adopted a resumed shape incompatible with handshake validation")
+			}
+			if err := got.Valid(); err != nil {
+				t.Fatalf("rejection did not preserve usable profile: %v", err)
+			}
+			if !slices.Equal(got.ResumedRemainder, p.ResumedRemainder) {
+				t.Fatal("rejection changed the profile")
+			}
+		})
 	}
 }

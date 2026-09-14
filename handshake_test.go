@@ -31,8 +31,15 @@ func mustCover(t *testing.T, host string) CoverProfile {
 // TestEndToEndOverSocket is the Phase 0 goal: a client and server complete the
 // opening over a real socket and pass bytes through the record layer.
 func TestEndToEndOverSocket(t *testing.T) {
+	for _, host := range []string{"www.microsoft.com", "unmeasured.example"} {
+		t.Run(host, func(t *testing.T) { testEndToEndOverSocket(t, host) })
+	}
+}
+
+func testEndToEndOverSocket(t *testing.T, host string) {
+	t.Helper()
 	k := ticketKey(t)
-	cover := mustCover(t, "www.microsoft.com")
+	cover := mustCover(t, host)
 	cred, err := k.Issue(99, cover.TicketLen)
 	if err != nil {
 		t.Fatal(err)
