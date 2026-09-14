@@ -242,7 +242,7 @@ func TestCoverForGenericDomains(t *testing.T) {
 }
 
 func TestCoverForRejectsInvalidHostnames(t *testing.T) {
-	for _, host := range []string{"", " example.com", "example.com ", "https://example.com", "example.com:443", "127.0.0.1", "::1", "*.example.com", "bad_name.example", "a..example", "-a.example", "a-.example", strings.Repeat("a", 64) + ".example", strings.Repeat("a.", 127) + "a"} {
+	for _, host := range []string{"", "localhost", "intranet", "1.2.3", "example.123", "example.com.", " example.com", "example.com ", "https://example.com", "example.com:443", "127.0.0.1", "::1", "*.example.com", "bad_name.example", "a..example", "-a.example", "a-.example", strings.Repeat("a", 64) + ".example", strings.Repeat("a.", 127) + "a"} {
 		if _, err := CoverFor(host); !errors.Is(err, ErrUnknownCover) {
 			t.Errorf("%q: expected invalid cover, got %v", host, err)
 		}

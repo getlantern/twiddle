@@ -127,7 +127,11 @@ func validCoverHost(host string) bool {
 	if len(host) == 0 || len(host) > 253 || net.ParseIP(host) != nil {
 		return false
 	}
-	for _, label := range strings.Split(host, ".") {
+	labels := strings.Split(host, ".")
+	if len(labels) < 2 || !strings.ContainsAny(labels[len(labels)-1], "abcdefghijklmnopqrstuvwxyz") {
+		return false
+	}
+	for _, label := range labels {
 		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
 			return false
 		}
