@@ -1,6 +1,7 @@
 package twiddle
 
 import (
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -121,10 +122,8 @@ func TestPerCoverHelpersAreCaseInsensitive(t *testing.T) {
 			t.Errorf("PSKFirstForCover(%q)=%v but (%q)=%v", upper, got, host, want)
 		}
 	}
-	// The github.com fallback is a literal compare, so it is the one that can
-	// disagree: 32 is the recorded measurement, DefaultTicketLen is not.
-	if got := TicketLenForCover("GitHub.com"); got != 32 {
-		t.Errorf("TicketLenForCover(\"GitHub.com\")=%d, want the recorded 32", got)
+	if got := TicketLenForCover("GitHub.com"); got != DefaultTicketLen {
+		t.Errorf("generic profile ticket length = %d, want %d", got, DefaultTicketLen)
 	}
 }
 
@@ -212,5 +211,40 @@ func TestAdoptCarriesTheFullRemainderJitter(t *testing.T) {
 		FullRemainderJitter: []int{0, 1},
 	}).DrawFullRemainder(); err == nil {
 		t.Error("DrawFullRemainder accepted a mismatched jitter")
+	}
+}
+
+func TestCoverForGenericDomains(t *testing.T) {
+	for _, host := range []string{"unmeasured.example", "GitHub.com", "cdn.example.net", "xn--bcher-kva.example"} {
+		t.Run(host, func(t *testing.T) {
+			p, err := CoverFor(host)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p.Host != strings.ToLower(host) {
+				t.Fatalf("wrong SNI: %s", p.Host)
+			}
+			if err := p.Valid(); err != nil {
+				t.Fatal(err)
+			}
+			if slices.Contains(MeasuredCovers(), p.Host) {
+				t.Fatal("generic profile presented as measured")
+			}
+			if p.TicketLen != TicketLenForCover(host) || p.PSKFirst != PSKFirstForCover(host) {
+				t.Fatal("profile helpers disagree")
+			}
+			p.BinderLen = 48
+			if p.Valid() == nil {
+				t.Fatal("accepted a binder incompatible with the cipher")
+			}
+		})
+	}
+}
+
+func TestCoverForRejectsInvalidHostnames(t *testing.T) {
+	for _, host := range []string{"", " example.com", "example.com ", "https://example.com", "example.com:443", "127.0.0.1", "::1", "*.example.com", "bad_name.example", "a..example", "-a.example", "a-.example", strings.Repeat("a", 64) + ".example", strings.Repeat("a.", 127) + "a"} {
+		if _, err := CoverFor(host); !errors.Is(err, ErrUnknownCover) {
+			t.Errorf("%q: expected invalid cover, got %v", host, err)
+		}
 	}
 }

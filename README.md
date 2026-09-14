@@ -33,6 +33,19 @@ preset-staleness treadmill. This module depends on **no TLS library** for its ow
 `TestShippedPackagesImportNoTLSLibrary`, not by memory. The measurement tooling under `harvest/` does use
 `crypto/tls`, and stays there so it cannot reach a shipped binary.
 
+## Cover domains
+
+`CoverFor` accepts DNS hostnames without requiring a measured per-domain profile.
+Known hosts retain their tuned profiles; other hosts use a default TLS 1.3
+SHA-256 profile with a 176-byte ticket. This default is a consistent handshake
+shape, not a claim to reproduce that domain's server fingerprint. Full-handshake
+support still requires the existing live-probe data.
+
+Use an SNI reachable in the target network and forward unauthenticated connections
+to that same cover service. Hostname acceptance does not check reachability.
+Clients, egress servers, and config generators must use a version with this
+support before assigning previously unsupported cover domains.
+
 ## Authentication
 
 Two paths, because the richest carrier is not present on every hello:

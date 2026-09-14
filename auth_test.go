@@ -262,10 +262,10 @@ func TestMeasuredCoversHaveBothParameters(t *testing.T) {
 		}
 	}
 	if slices.Contains(MeasuredCovers(), "github.com") {
-		t.Error("github.com is measured at 32 bytes, below MinTicketLen; it must not be offered")
+		t.Error("github.com must not be listed as a tuned profile")
 	}
-	if TicketLenForCover("github.com") != 32 {
-		t.Error("the github.com measurement should stay recorded even though it is unusable")
+	if TicketLenForCover("github.com") != DefaultTicketLen {
+		t.Error("github.com should use the generic profile ticket length")
 	}
 	// The fallback host must still be answerable, not panic or hang.
 	if got := TicketLenForCover("unmeasured.example"); got != DefaultTicketLen {

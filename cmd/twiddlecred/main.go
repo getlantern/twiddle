@@ -14,7 +14,7 @@ import (
 
 func main() {
 	clientID := flag.Uint64("client-id", 1, "client identifier embedded in the ticket")
-	cover := flag.String("cover", "", "measured cover host (required)")
+	cover := flag.String("cover", "", "cover hostname (required)")
 	printPool := flag.Bool("print-pool", false, "write a usable hello pool to stdout (embedded snapshot; tests only)")
 	flag.Parse()
 

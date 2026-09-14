@@ -5,19 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"slices"
 	"strings"
 	"time"
 )
 
-// CoverProfile is one impersonated identity. Every fidelity parameter that
-// varies by server lives here so a microsoft-selected egress cannot emit a
-// cloudflare binder, cipher, or flight.
-//
-// Numbers are from harvest/testdata: ticket lengths from cmd/resume, PSK
-// extension order from cmd/shresume, resumed burst sizes from
-// tls13-burst-resumption.log (Xue Wb=3). BinderLen is the Hash.length of
-// CipherSuite — 32 for SHA-256, 48 for SHA-384.
+// CoverProfile binds a cover hostname to a consistent TLS handshake shape.
+// BinderLen must match the hash length of CipherSuite.
 type CoverProfile struct {
 	Host        string
 	CipherSuite uint16
@@ -74,8 +69,7 @@ type CoverProfile struct {
 	ResumedClientFlight int
 }
 
-// ErrUnknownCover is returned when a caller names a host we have not measured,
-// or one whose ticket is too short to carry the authenticator (github.com).
+// ErrUnknownCover is returned when a cover is not a valid DNS hostname.
 var ErrUnknownCover = fmt.Errorf("twiddle: unknown cover identity")
 
 var covers = map[string]CoverProfile{
@@ -108,14 +102,42 @@ var covers = map[string]CoverProfile{
 	},
 }
 
-// CoverFor returns the measured profile for host. Unknown names, and names we
-// measured but cannot impersonate, are rejected rather than partially faked.
+// CoverFor returns a tuned profile for known hosts or a default TLS 1.3 profile
+// for other DNS hostnames. The default is not a measurement of the named host.
 func CoverFor(host string) (CoverProfile, error) {
-	p, ok := covers[strings.ToLower(host)]
-	if !ok {
+	host = strings.ToLower(host)
+	if !validCoverHost(host) {
 		return CoverProfile{}, fmt.Errorf("%w: %s", ErrUnknownCover, host)
 	}
-	return p, nil
+	if p, ok := covers[host]; ok {
+		p.ResumedRemainder = slices.Clone(p.ResumedRemainder)
+		return p, nil
+	}
+	return CoverProfile{
+		Host:                host,
+		CipherSuite:         TLS_AES_128_GCM_SHA256,
+		BinderLen:           32,
+		TicketLen:           DefaultTicketLen,
+		ResumedRemainder:    []int{64},
+		ResumedClientFlight: 149,
+	}, nil
+}
+
+func validCoverHost(host string) bool {
+	if len(host) == 0 || len(host) > 253 || net.ParseIP(host) != nil {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, c := range label {
+			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // MeasuredCovers lists impersonable identities in stable order.
@@ -123,10 +145,7 @@ func MeasuredCovers() []string {
 	return []string{"www.cloudflare.com", "www.google.com", "www.microsoft.com"}
 }
 
-// Valid reports whether p is exactly a measured identity. A half-filled
-// profile — or one that mixes one host's ticket length with another's binder —
-// is how microsoft-selected egresses previously emitted a 32-byte SHA-256
-// binder.
+// Valid reports whether the profile matches the tuned or default shape for its host.
 func (p CoverProfile) Valid() error {
 	known, err := CoverFor(p.Host)
 	if err != nil {
@@ -135,7 +154,7 @@ func (p CoverProfile) Valid() error {
 	if p.CipherSuite != known.CipherSuite || p.BinderLen != known.BinderLen ||
 		p.TicketLen != known.TicketLen || p.PSKFirst != known.PSKFirst ||
 		!slices.Equal(p.ResumedRemainder, known.ResumedRemainder) || p.ResumedClientFlight != known.ResumedClientFlight {
-		return fmt.Errorf("twiddle: cover profile for %s does not match the measured identity", p.Host)
+		return fmt.Errorf("twiddle: cover profile for %s does not match its TLS profile", p.Host)
 	}
 	return nil
 }
@@ -290,24 +309,16 @@ func (p CoverProfile) ClientEncryptedWire() int {
 	return p.ResumedClientFlight - len(ChangeCipherSpec())
 }
 
-// TicketLenForCover returns the measured ticket length, including for a known
-// but unimpersonable host, or DefaultTicketLen for an unmeasured host. Prefer
-// CoverFor: this exists so existing callers that only needed the length keep
-// compiling.
+// TicketLenForCover returns the selected profile's ticket length, or
+// DefaultTicketLen if host is invalid.
 func TicketLenForCover(host string) int {
 	if p, err := CoverFor(host); err == nil {
 		return p.TicketLen
 	}
-	// EqualFold, because CoverFor lowercases before its lookup and a fallback
-	// that does not would answer differently for "GitHub.com" than for
-	// "github.com" -- a silent 176 where the record says 32.
-	if strings.EqualFold(host, "github.com") {
-		return 32
-	}
 	return DefaultTicketLen
 }
 
-// PSKFirstForCover reports the measured ServerHello extension order.
+// PSKFirstForCover reports the selected profile's ServerHello extension order.
 func PSKFirstForCover(host string) bool {
 	if p, err := CoverFor(host); err == nil {
 		return p.PSKFirst
