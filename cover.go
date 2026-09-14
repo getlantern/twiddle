@@ -399,7 +399,8 @@ const (
 // structurally instead, on the ServerHello length, the record count and a
 // plausible size range.
 func (p CoverProfile) Adopt(res ProbeResult) (CoverProfile, error) {
-	if res.Host != p.Host {
+	probeCover, err := CoverFor(res.Host)
+	if err != nil || probeCover.Host != p.Host {
 		return p, fmt.Errorf("twiddle: probe of %s cannot update the %s profile", res.Host, p.Host)
 	}
 	if len(res.Remainder) == 0 || len(res.Remainder) > maxRemainderRecords {

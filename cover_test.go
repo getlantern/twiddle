@@ -253,3 +253,33 @@ func TestCoverForRejectsInvalidHostnames(t *testing.T) {
 		}
 	}
 }
+
+func TestAdoptMatchesCanonicalCoverHost(t *testing.T) {
+	p, err := CoverFor("GitHub.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		host string
+		ok   bool
+	}{
+		{host: "GitHub.com", ok: true},
+		{host: "github.com", ok: true},
+		{host: "different.example"},
+		{host: "github.com."},
+		{host: "gıthub.com"},
+	} {
+		t.Run(tc.host, func(t *testing.T) {
+			got, err := p.Adopt(ProbeResult{
+				Host: tc.host, ServerHello: ServerHelloResumedLen,
+				Remainder: []int{64}, OpeningBurst: p.ResumedOpeningBurst(),
+			})
+			if (err == nil) != tc.ok {
+				t.Fatalf("Adopt(%q) error = %v, want success %v", tc.host, err, tc.ok)
+			}
+			if got.Host != "github.com" {
+				t.Fatalf("adoption changed canonical cover to %q", got.Host)
+			}
+		})
+	}
+}
