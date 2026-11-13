@@ -3,9 +3,194 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>twiddle — a TLS ClientHello, byte by byte</title>
-<meta name="description" content="A TLS-shaped transport built from genuine harvested ClientHellos. Every byte we change, and the measurement that justified it.">
+<title>twiddle — a TLS ClientHello, byte by byte, from Lantern</title>
+<meta name="description" content="twiddle, Lantern's experimental TLS-shaped circumvention transport, built from genuine browser ClientHellos: every byte it changes, and the measurements behind it.">
+<link rel="canonical" href="https://twiddle.lantern.io/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="twiddle">
+<meta property="og:url" content="https://twiddle.lantern.io/">
+<meta property="og:title" content="twiddle — a TLS ClientHello, byte by byte, from Lantern">
+<meta property="og:description" content="A TLS-shaped transport built from genuine harvested ClientHellos. Every byte we change, and the measurement that justified it.">
+<meta property="og:image" content="https://twiddle.lantern.io/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="twiddle: ordinary on the wire. A genuine browser ClientHello with a few fields changed.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="twiddle — a TLS ClientHello, byte by byte, from Lantern">
+<meta name="twitter:description" content="A TLS-shaped transport built from genuine harvested ClientHellos. Every byte we change, and the measurement that justified it.">
+<meta name="twitter:image" content="https://twiddle.lantern.io/og.png">
+<meta name="theme-color" content="#0e1014">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "Organization",
+   "@id": "https://lantern.io/#organization",
+   "name": "Lantern",
+   "legalName": "Brave New Software Project, Inc.",
+   "url": "https://lantern.io",
+   "sameAs": [
+    "https://github.com/getlantern"
+   ]
+  },
+  {
+   "@type": "WebSite",
+   "@id": "https://twiddle.lantern.io/#website",
+   "url": "https://twiddle.lantern.io/",
+   "name": "twiddle",
+   "publisher": {
+    "@id": "https://lantern.io/#organization"
+   },
+   "inLanguage": "en"
+  },
+  {
+   "@type": "WebPage",
+   "@id": "https://twiddle.lantern.io/#webpage",
+   "url": "https://twiddle.lantern.io/",
+   "name": "twiddle — a TLS ClientHello, byte by byte, from Lantern",
+   "isPartOf": {
+    "@id": "https://twiddle.lantern.io/#website"
+   },
+   "about": {
+    "@id": "https://twiddle.lantern.io/#software"
+   },
+   "publisher": {
+    "@id": "https://lantern.io/#organization"
+   },
+   "primaryImageOfPage": "https://twiddle.lantern.io/og.png",
+   "inLanguage": "en"
+  },
+  {
+   "@type": "SoftwareSourceCode",
+   "@id": "https://twiddle.lantern.io/#software",
+   "name": "twiddle",
+   "description": "twiddle is an experimental censorship-circumvention transport from Lantern, written in Go. A connection opens with a genuine ClientHello harvested from a real browser, with a handful of fields changed. The server answers with a synthesised ServerHello, and after the compatibility ChangeCipherSpec records, the connection is an AEAD tunnel framed as ordinary TLS application_data (0x17) records.",
+   "codeRepository": "https://github.com/getlantern/twiddle",
+   "programmingLanguage": "Go",
+   "url": "https://twiddle.lantern.io/",
+   "author": {
+    "@id": "https://lantern.io/#organization"
+   },
+   "keywords": "censorship circumvention, TLS ClientHello, TLS fingerprinting, uTLS, active probing, GREASE, ECH, pre_shared_key"
+  },
+  {
+   "@type": "FAQPage",
+   "@id": "https://twiddle.lantern.io/#faq",
+   "isPartOf": {
+    "@id": "https://twiddle.lantern.io/#webpage"
+   },
+   "mainEntity": [
+    {
+     "@type": "Question",
+     "name": "What is twiddle?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "twiddle is an experimental censorship-circumvention transport from Lantern, written in Go. A connection opens with a genuine ClientHello harvested from a real browser, with a handful of fields changed. The server answers with a synthesised ServerHello, and after the compatibility ChangeCipherSpec records, the connection is an AEAD tunnel framed as ordinary TLS application_data (0x17) records."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Why is it called twiddle?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "It describes the method: take the bytes a real browser sent and twiddle a handful of fields, such as the SNI, the authenticator and the extension order, leaving everything else exactly as the browser produced it."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Why doesn't twiddle need a real TLS handshake?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "In TLS 1.3, every handshake message after the ServerHello is encrypted and framed as an application_data record. Of the TLS records themselves, an observer can read only the ClientHello, the ServerHello and two one-byte ChangeCipherSpec records; the rest are opaque. So the connection has to open like TLS, not be TLS. Record sizes, counts and timing, destination addresses and connection history are still visible, which is why twiddle pads and segments its records to a measured browsing profile and picks covers with care."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "How is twiddle different from uTLS?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "uTLS is a TLS library that imitates browser fingerprints. twiddle's shipped packages don't use uTLS or any other TLS library, and a test enforces that. Instead of driving a TLS stack with a browser preset, twiddle sends a hello a real browser produced, so there's no key-share splicing, PSK binder obligation or HelloRetryRequest to handle. Captured hellos still go stale as browsers update, which is why twiddle prefers hellos tapped from the device's own browser."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "What does twiddle change in the ClientHello?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "On every connection it replaces the SNI with the cover hostname, draws fresh random and session ID bytes, generates fresh key shares, redraws the GREASE values, refreshes the GREASE ECH extension, shuffles the interior extensions and recomputes the lengths. Then it adds its authenticator. Ordinary cipher suites, ALPN and the other extension payloads are copied from the browser's hello. See exactly what changes."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "How does a twiddle server recognise its own clients?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "Through one of two carriers. A resumption-shaped opening carries a twiddle credential in the pre_shared_key ticket, with a binder that is an HMAC over the hello, both opaque to observers by specification. A full-handshake-shaped opening puts a 144-byte companion ticket in the GREASE ECH payload and an HMAC over the whole hello in ClientHello.random. Either way, the X25519 key share supplies forward secrecy."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "What happens when a censor probes a twiddle server?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "A connection that fails to authenticate must be forwarded byte for byte to the real cover site, so the prober gets that site's genuine TLS handshake. twiddle's Server returns ErrNotOurs for such connections and leaves the forwarding to the caller; Lantern's sing-box inbound in lantern-box does it."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Can a captured twiddle handshake be replayed?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "The server is built to refuse it. Credentials rotate on every connection, and the server's replay gate remembers the newest ticket each client has presented, so a spent or forged ticket takes the cover path like any other connection that fails to authenticate. One known limit: a replay cache pushed to its client-capacity limit can evict a still-valid entry."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Where do twiddle's ClientHellos come from?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "In order of preference: hellos tapped from the device's own outbound TLS, then hellos delivered by configuration. The core uses its compiled-in snapshot only when the caller explicitly opts in, which is meant for tests; lantern-box currently enables that fallback, so a working connection doesn't prove the fingerprint is fresh. Sources are never merged, and tapped hellos must pass through Sanitize before they're stored, because they name sites the user visited."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Does twiddle provide post-quantum protection?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "No. If the browser's hello offers X25519MLKEM768, twiddle sends a fresh, valid hybrid key share so the hello looks right, but it discards those private keys. The real key agreement uses X25519."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Is twiddle ready to use?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "It's experimental. The core transport works end to end and is tested over a real socket, and lantern-box has a twiddle inbound and outbound, but cloud provisioning is still in review and this site isn't a deployment announcement. See the implementation status. To get around censorship today, download Lantern."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Where is twiddle's source code?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "At github.com/getlantern/twiddle, which is public. It includes the Go transport and the harvest/ tooling and logs behind every measurement on this page."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Who makes twiddle?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "Lantern, the team behind the Lantern VPN and censorship-circumvention app, run by Brave New Software Project, Inc."
+     }
+    }
+   ]
+  }
+ ]
+}
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Serif:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
@@ -15,14 +200,14 @@
 
 <header>
   <div class="wrap">
-    <p class="eyebrow rise">getlantern/twiddle</p>
+    <p class="eyebrow rise"><a href="https://github.com/getlantern/twiddle">getlantern/twiddle</a> · an experimental transport from <a href="https://lantern.io">Lantern</a></p>
     <h1 class="rise">Ordinary<br>on the wire.</h1>
     <p class="lede narrow rise">
       An experimental TLS-shaped transport built from a <strong>genuine ClientHello
       harvested from a real browser</strong>. Fresh keys, two authentication carriers, and
       measured record shapes — without a TLS stack in the shipped transport.
     </p>
-    <p class="note">Updated 5 September 2026 · <a href="#rewrites">Exactly what changes</a> · <a href="#status">Implementation &amp; rollout status</a> · <a href="#full-handshake">The full-handshake carrier</a></p>
+    <p class="note">Updated 5 September 2026 · <a href="#rewrites">Exactly what changes</a> · <a href="#status">Implementation &amp; rollout status</a> · <a href="#full-handshake">The full-handshake carrier</a> · <a href="#faq">FAQ</a></p>
     <p class="tagline rise">
       A gray sedan on a motorway is not hidden. It is simply not worth pulling over —<br>
       and pulling it over means pulling over ten thousand identical cars.
@@ -440,12 +625,90 @@
   </div>
 </section>
 
+<section id="faq">
+  <div class="wrap">
+    <p class="eyebrow">10 — questions</p>
+    <h2>Questions people ask about twiddle</h2>
+    <div class="faq">
+      <!-- faq:start -->
+      <div class="qa" id="what-is-twiddle">
+        <h3>What is twiddle?</h3>
+        <p>twiddle is an experimental censorship-circumvention transport from <a href="https://lantern.io">Lantern</a>, written in Go. A connection opens with a genuine ClientHello harvested from a real browser, with a handful of fields changed. The server answers with a synthesised ServerHello, and after the compatibility ChangeCipherSpec records, the connection is an AEAD tunnel framed as ordinary TLS <code>application_data</code> (<code>0x17</code>) records.</p>
+      </div>
+      <div class="qa" id="why-is-it-called-twiddle">
+        <h3>Why is it called twiddle?</h3>
+        <p>It describes the method: take the bytes a real browser sent and twiddle a handful of fields, such as the SNI, the authenticator and the extension order, leaving everything else exactly as the browser produced it.</p>
+      </div>
+      <div class="qa" id="why-doesn-t-twiddle-need-a-real-tls-handshake">
+        <h3>Why doesn&#x27;t twiddle need a real TLS handshake?</h3>
+        <p>In TLS&nbsp;1.3, every handshake message after the ServerHello is encrypted and framed as an <code>application_data</code> record. Of the TLS records themselves, an observer can read only the ClientHello, the ServerHello and two one-byte ChangeCipherSpec records; the rest are opaque. So the connection has to open like TLS, not be TLS. Record sizes, counts and timing, destination addresses and connection history are still visible, which is why twiddle pads and segments its records to a measured browsing profile and picks covers with care.</p>
+      </div>
+      <div class="qa" id="how-is-twiddle-different-from-utls">
+        <h3>How is twiddle different from uTLS?</h3>
+        <p>uTLS is a TLS library that imitates browser fingerprints. twiddle's shipped packages don't use uTLS or any other TLS library, and a test enforces that. Instead of driving a TLS stack with a browser preset, twiddle sends a hello a real browser produced, so there's no key-share splicing, PSK binder obligation or HelloRetryRequest to handle. Captured hellos still go stale as browsers update, which is why twiddle prefers hellos tapped from the device's own browser.</p>
+      </div>
+      <div class="qa" id="what-does-twiddle-change-in-the-clienthello">
+        <h3>What does twiddle change in the ClientHello?</h3>
+        <p>On every connection it replaces the SNI with the cover hostname, draws fresh random and session ID bytes, generates fresh key shares, redraws the GREASE values, refreshes the GREASE ECH extension, shuffles the interior extensions and recomputes the lengths. Then it adds its authenticator. Ordinary cipher suites, ALPN and the other extension payloads are copied from the browser's hello. See <a href="#rewrites">exactly what changes</a>.</p>
+      </div>
+      <div class="qa" id="how-does-a-twiddle-server-recognise-its-own-clients">
+        <h3>How does a twiddle server recognise its own clients?</h3>
+        <p>Through one of two carriers. A resumption-shaped opening carries a twiddle credential in the <code>pre_shared_key</code> ticket, with a binder that is an HMAC over the hello, both opaque to observers by specification. A full-handshake-shaped opening puts a 144-byte companion ticket in the GREASE ECH payload and an HMAC over the whole hello in <code>ClientHello.random</code>. Either way, the X25519 key share supplies forward secrecy.</p>
+      </div>
+      <div class="qa" id="what-happens-when-a-censor-probes-a-twiddle-server">
+        <h3>What happens when a censor probes a twiddle server?</h3>
+        <p>A connection that fails to authenticate must be forwarded byte for byte to the real cover site, so the prober gets that site's genuine TLS handshake. twiddle's <code>Server</code> returns <code>ErrNotOurs</code> for such connections and leaves the forwarding to the caller; Lantern's sing-box inbound in lantern-box does it.</p>
+      </div>
+      <div class="qa" id="can-a-captured-twiddle-handshake-be-replayed">
+        <h3>Can a captured twiddle handshake be replayed?</h3>
+        <p>The server is built to refuse it. Credentials rotate on every connection, and the server's replay gate remembers the newest ticket each client has presented, so a spent or forged ticket takes the cover path like any other connection that fails to authenticate. One known limit: a replay cache pushed to its client-capacity limit can evict a still-valid entry.</p>
+      </div>
+      <div class="qa" id="where-do-twiddle-s-clienthellos-come-from">
+        <h3>Where do twiddle&#x27;s ClientHellos come from?</h3>
+        <p>In order of preference: hellos tapped from the device's own outbound TLS, then hellos delivered by configuration. The core uses its compiled-in snapshot only when the caller explicitly opts in, which is meant for tests; lantern-box currently enables that fallback, so a working connection doesn't prove the fingerprint is fresh. Sources are never merged, and tapped hellos must pass through <code>Sanitize</code> before they're stored, because they name sites the user visited.</p>
+      </div>
+      <div class="qa" id="does-twiddle-provide-post-quantum-protection">
+        <h3>Does twiddle provide post-quantum protection?</h3>
+        <p>No. If the browser's hello offers X25519MLKEM768, twiddle sends a fresh, valid hybrid key share so the hello looks right, but it discards those private keys. The real key agreement uses X25519.</p>
+      </div>
+      <div class="qa" id="is-twiddle-ready-to-use">
+        <h3>Is twiddle ready to use?</h3>
+        <p>It's experimental. The core transport works end to end and is tested over a real socket, and lantern-box has a twiddle inbound and outbound, but cloud provisioning is still in review and this site isn't a deployment announcement. See the <a href="#status">implementation status</a>. To get around censorship today, <a href="https://lantern.io/download">download Lantern</a>.</p>
+      </div>
+      <div class="qa" id="where-is-twiddle-s-source-code">
+        <h3>Where is twiddle&#x27;s source code?</h3>
+        <p>At <a href="https://github.com/getlantern/twiddle">github.com/getlantern/twiddle</a>, which is public. It includes the Go transport and the <code>harvest/</code> tooling and logs behind every measurement on this page.</p>
+      </div>
+      <div class="qa" id="who-makes-twiddle">
+        <h3>Who makes twiddle?</h3>
+        <p><a href="https://lantern.io">Lantern</a>, the team behind the Lantern VPN and censorship-circumvention app, run by Brave New Software Project, Inc.</p>
+      </div>
+      <!-- faq:end -->
+    </div>
+  </div>
+</section>
+
 <footer>
   <div class="wrap">
+    <nav class="more" aria-labelledby="more-h">
+      <p class="eyebrow" id="more-h">More from Lantern</p>
+      <ul>
+        <li><a href="https://lantern.io">Lantern</a><span>Free VPN and censorship-circumvention app</span></li>
+        <li><a href="https://samizdat.lantern.io">Samizdat</a><span>Censorship-circumvention protocol shaped like real TLS</span></li>
+        <li><a href="https://soar.lantern.io">Soar</a><span>DNS tunnel for networks that censor everything but DNS</span></li>
+        <li><a href="https://kindling.lantern.io">Kindling</a><span>Gets an app's first requests through censoring firewalls</span></li>
+        <li><a href="https://lamplighter.lantern.io">Lamplighter</a><span>Run a Lantern node</span></li>
+        <li><a href="https://corpus.lantern.io">Circumvention corpus</a><span>Structured index of censorship-circumvention research</span></li>
+        <li><a href="https://geedge.lantern.io">Geedge leak index</a><span>What the Geedge/MESA leak reveals about censor capabilities</span></li>
+        <li><a href="https://ietf.lantern.io">IETF corpus</a><span>LLM-callable corpus of IETF RFCs and drafts</span></li>
+        <li><a href="https://unbounded-wp.lantern.io">Lantern Action Mode for WordPress</a><span>Live demo</span></li>
+      </ul>
+    </nav>
     <p>
       Source: <a href="https://github.com/getlantern/twiddle">github.com/getlantern/twiddle</a> ·
       zero external dependencies ·
-      part of <a href="https://lantern.io">Lantern</a>
+      part of <a href="https://lantern.io">Lantern</a> ·
+      <a href="https://lantern.io/download">Get Lantern</a>
     </p>
     <p class="note">
       The ClientHello rendered above is a real capture, included in the repository as test data.
