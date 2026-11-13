@@ -30,3 +30,22 @@ span offsets are computed by walking the record, not hard-coded, so any valid he
 
 The rendered capture's SNI is `localhost`: it was taken against a local server, so the file
 carries no one's browsing.
+
+## Not-found page
+
+`404.html` is the not-found page. Without it, Cloudflare Pages answers every path that has no
+file with `index.html` and a 200, so crawlers see a copy of the home page at every broken link. It uses `style.css`, because
+the `_headers` CSP blocks inline styles.
+
+## The FAQ and structured data
+
+The FAQ lives in `tools/faq.py`, which writes both the visible FAQ section and the schema.org
+`FAQPage` markup into `index.html`, so the two always say the same thing. To change a question or
+answer, edit the list there and run `python3 site/tools/faq.py`. The same script writes the rest of
+the JSON-LD graph (`Organization`, `WebSite`, `WebPage`, `SoftwareSourceCode`). Check every answer
+against the repo before changing it; there's no `license` in the graph because the repo has no
+LICENSE file yet.
+
+`og.png` is the 1200×630 link-preview image, a screenshot of `tools/og.html` (styles in
+`tools/og.css`); its bytes are the first bytes of `pool/chrome.hex`. `robots.txt` and `sitemap.xml`
+point crawlers at the one page; update the sitemap's `lastmod` when the page changes.
